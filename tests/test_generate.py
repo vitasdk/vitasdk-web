@@ -356,9 +356,14 @@ class TestSnapshots(unittest.TestCase):
         self.assertIn("current", html)
 
     def test_nothing_published_says_so_instead_of_an_empty_table(self):
-        html = generate.render_snapshots(self.status())
+        html = generate.render_snapshots(self.status(published_snapshots=[]))
         self.assertIn("Nothing has been published yet", html)
         self.assertNotIn("<table>", html)
+
+    def test_an_older_status_file_does_not_claim_nothing_is_published(self):
+        html = generate.render_snapshots(self.status())
+        self.assertNotIn("Nothing has been published", html)
+        self.assertIn("before the site listed", html)
 
     def test_an_unreadable_date_does_not_hide_the_snapshot(self):
         html = generate.render_snapshots(self.status(

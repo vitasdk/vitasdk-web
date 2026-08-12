@@ -380,7 +380,12 @@ def render_snapshots(status: dict[str, Any]) -> str:
     repo = status.get("snapshot_repo", "")
     current = status.get("published_tag", "")
 
-    if not snapshots:
+    if "published_snapshots" not in status:
+        # An older status file cannot say whether anything is published, and
+        # claiming nothing is would be a lie the first time it happens.
+        body = ("<p>This status file was written before the site listed "
+                "snapshots. The list appears after the next build.</p>")
+    elif not snapshots:
         body = ("<p>Nothing has been published yet. Packages that are built sit "
                 "in the staging repository until a snapshot is cut.</p>")
     else:
