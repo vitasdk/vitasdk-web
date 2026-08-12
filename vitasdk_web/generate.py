@@ -69,10 +69,33 @@ def load_status(source: str) -> dict[str, Any]:
         raise SystemExit(f"ERROR: cannot reach {url}: {e.reason}") from None
 
 
-def counts(packages: list[dict[str, Any]]) -> dict[str, int]:
+def worlds_of(status: dict[str, Any]) -> list[dict[str, Any]]:
+    """The targets the catalogue is built for, newest schema or older one."""
+
+    if status.get("worlds"):
+        return list(status["worlds"])
+    # A status file written before worlds existed describes a single one.
+    return [{"arch": "vita", "core": status.get("core_snapshot", ""),
+             "repository": "vita", "staging_repository": "vita-staging",
+             "description": ""}]
+
+
+def builds_of(package: dict[str, Any], worlds: list[dict[str, Any]]) -> dict[str, Any]:
+    if "builds" in package:
+        return package["builds"]
+    return {worlds[0]["arch"]: {"status": package.get("status", "unknown"),
+                                "details": package.get("details", {})}}
+
+
+def counts(packages: list[dict[str, Any]], world: str,
+           worlds: list[dict[str, Any]] | None = None) -> dict[str, int]:
+    worlds = worlds or [{"arch": world}]
     result: dict[str, int] = {}
     for package in packages:
-        result[package["status"]] = result.get(package["status"], 0) + 1
+        build = builds_of(package, worlds).get(world)
+        if build is None:
+            continue
+        result[build["status"]] = result.get(build["status"], 0) + 1
     return result
 
 
@@ -112,34 +135,51 @@ def status_badge(status: str) -> str:
 
 def render_index(status: dict[str, Any]) -> str:
     packages = status["packages"]
-    tally = counts(packages)
-    summary = " ".join(
-        f'<span class="tally">{tally.get(key, 0)} {esc(STATUS_LABELS[key][0].lower())}</span>'
-        for key in ("finished", "finished-but-blocked", "waiting-for-build",
-                    "waiting-for-dependencies", "failed-to-build")
-        if tally.get(key))
+    worlds = worlds_of(status)
+
+    summaries = []
+    for world in worlds:
+        tally = counts(packages, world["arch"], worlds)
+        line = " ".join(
+            f'<span class="tally">{tally.get(key, 0)} {esc(STATUS_LABELS[key][0].lower())}</span>'
+            for key in ("finished", "finished-but-blocked", "waiting-for-build",
+                        "waiting-for-dependencies", "failed-to-build")
+            if tally.get(key))
+        label = f'<span class="world">{esc(world["arch"])}</span> ' if len(worlds) > 1 else ""
+        summaries.append(f"<p class=\"summary\">{label}{line}</p>")
+
+    headers = "".join(f"<th>{esc(w['arch'])}</th>" for w in worlds) if len(worlds) > 1 \
+        else "<th>Status</th>"
 
     rows = []
     for package in packages:
         repo_version = package.get("repo_version") or "&mdash;"
+        builds = builds_of(package, worlds)
+        cells = ""
+        for world in worlds:
+            build = builds.get(world["arch"])
+            cells += f"<td>{status_badge(build['status']) if build else '<span class=\"absent\">&mdash;</span>'}</td>"
         rows.append(
             f'<tr data-name="{esc(package["name"])}">'
             f'<td><a href="package/{esc(package["name"])}.html">{esc(package["name"])}</a></td>'
             f'<td class="version">{esc(package["version"])}</td>'
             f'<td class="version">{repo_version}</td>'
-            f'<td>{status_badge(package["status"])}</td>'
+            f'{cells}'
             f'<td class="desc">{esc(package.get("description", ""))}</td>'
             f'</tr>')
 
+    built_against = ", ".join(
+        f'<code>{esc(w["core"])}</code>' + (f' ({esc(w["arch"])})' if len(worlds) > 1 else "")
+        for w in worlds)
+
     return page("VitaSDK packages", f"""
 <h1>Package catalogue</h1>
-<p class="lede">{len(packages)} packages built against
-<code>{esc(status.get("core_snapshot", "unknown core"))}</code>
+<p class="lede">{len(packages)} packages built against {built_against}
 from <a href="https://github.com/{esc(status.get("packages_repo", ""))}">{esc(status.get("packages_repo", ""))}</a>.</p>
-<p class="summary">{summary}</p>
+{"".join(summaries)}
 <input id="filter" type="search" placeholder="Filter packages" autocomplete="off">
 <table id="packages">
-<thead><tr><th>Package</th><th>Version</th><th>In repository</th><th>Status</th><th>Description</th></tr></thead>
+<thead><tr><th>Package</th><th>Version</th><th>In repository</th>{headers}<th>Description</th></tr></thead>
 <tbody>
 {chr(10).join(rows)}
 </tbody>
@@ -165,14 +205,30 @@ def render_package(package: dict[str, Any], status: dict[str, Any]) -> str:
             f'<a class="pill" href="{esc(name)}.html">{esc(name)}</a>' for name in names)
         return f"<p>{items}</p>"
 
-    details = package.get("details") or {}
+    worlds = worlds_of(status)
+    builds = builds_of(package, worlds)
+
     notes = []
-    if details.get("desc"):
-        notes.append(f"<p class=\"note\">{esc(details['desc'])}</p>")
-    if package["status"] in STATUS_HELP:
-        notes.append(f"<p class=\"note\">{esc(STATUS_HELP[package['status']])}</p>")
-    for label, url in (details.get("urls") or {}).items():
-        notes.append(f'<p class="note">Build log: <a href="{esc(url)}">{esc(label)}</a></p>')
+    rows = []
+    for world in worlds:
+        build = builds.get(world["arch"])
+        if build is None:
+            rows.append(f'<tr><td class="k">{esc(world["arch"])}</td>'
+                        f'<td><span class="absent">not built for this target</span></td></tr>')
+            continue
+        rows.append(f'<tr><td class="k">{esc(world["arch"])}</td>'
+                    f'<td>{status_badge(build["status"])} '
+                    f'<span class="desc">{esc(world.get("description", ""))}</span></td></tr>')
+        details = build.get("details") or {}
+        prefix = f'{esc(world["arch"])}: ' if len(worlds) > 1 else ""
+        if details.get("desc"):
+            notes.append(f"<p class=\"note\">{prefix}{esc(details['desc'])}</p>")
+        if build["status"] in STATUS_HELP:
+            notes.append(f"<p class=\"note\">{prefix}{esc(STATUS_HELP[build['status']])}</p>")
+        for label, url in (details.get("urls") or {}).items():
+            notes.append(f'<p class="note">{prefix}build log: '
+                         f'<a href="{esc(url)}">{esc(label)}</a></p>')
+    world_rows = "".join(rows)
 
     homepage = ""
     if package.get("url"):
@@ -187,11 +243,11 @@ def render_package(package: dict[str, Any], status: dict[str, Any]) -> str:
 <table class="facts">
 <tr><th>Recipe version</th><td>{esc(package['version'])}</td></tr>
 <tr><th>In the repository</th><td>{esc(package.get('repo_version') or '—')}</td></tr>
-<tr><th>Status</th><td>{status_badge(package['status'])}</td></tr>
 <tr><th>Provides</th><td>{binaries}</td></tr>
 <tr><th>Licence</th><td>{licenses}</td></tr>
-<tr><th>Built against</th><td><code>{esc(status.get('core_snapshot', ''))}</code></td></tr>
 </table>
+<h2>Targets</h2>
+<table class="facts">{world_rows}</table>
 {''.join(notes)}
 {homepage}
 <h2>Depends on</h2>
@@ -204,10 +260,17 @@ def render_package(package: dict[str, Any], status: dict[str, Any]) -> str:
 
 def render_status(status: dict[str, Any]) -> str:
     packages = status["packages"]
-    tally = counts(packages)
-    rows = "".join(
-        f"<tr><td>{status_badge(key)}</td><td>{tally.get(key, 0)}</td></tr>"
-        for key in STATUS_LABELS if tally.get(key))
+    worlds = worlds_of(status)
+
+    rows = ""
+    for world in worlds:
+        tally = counts(packages, world["arch"], worlds)
+        if len(worlds) > 1:
+            rows += (f'<tr><th colspan="2">{esc(world["arch"])} '
+                     f'<span class="desc">{esc(world.get("description", ""))}</span></th></tr>')
+        rows += "".join(
+            f"<tr><td>{status_badge(key)}</td><td>{tally.get(key, 0)}</td></tr>"
+            for key in STATUS_LABELS if tally.get(key))
 
     jobs = status.get("jobs") or []
     if jobs:
@@ -219,42 +282,56 @@ def render_status(status: dict[str, Any]) -> str:
     else:
         job_table = "<p>No workers are building right now.</p>"
 
-    failed = [p for p in packages if p["status"] == "failed-to-build"]
-    if failed:
-        failed_rows = "".join(
-            f'<tr><td><a href="package/{esc(p["name"])}.html">{esc(p["name"])}</a></td>'
-            f'<td class="version">{esc(p["version"])}</td>'
-            f'<td>{esc((p.get("details") or {}).get("desc") or "")}</td></tr>' for p in failed)
-        failed_table = (f"<table><thead><tr><th>Package</th><th>Version</th><th>Detail</th>"
-                        f"</tr></thead><tbody>{failed_rows}</tbody></table>")
+    failed_rows = ""
+    for package in packages:
+        for world in worlds:
+            build = builds_of(package, worlds).get(world["arch"])
+            if not build or build["status"] != "failed-to-build":
+                continue
+            failed_rows += (
+                f'<tr><td><a href="package/{esc(package["name"])}.html">{esc(package["name"])}</a></td>'
+                f'<td class="k">{esc(world["arch"])}</td>'
+                f'<td class="version">{esc(package["version"])}</td>'
+                f'<td>{esc((build.get("details") or {}).get("desc") or "")}</td></tr>')
+    failed_table = (f"<table><thead><tr><th>Package</th><th>Target</th><th>Version</th>"
+                    f"<th>Detail</th></tr></thead><tbody>{failed_rows}</tbody></table>"
+                    ) if failed_rows else "<p>Nothing is failing.</p>"
+
+    raw_cycles = status.get("cycles") or []
+    pairs = []
+    if isinstance(raw_cycles, dict):
+        for arch, entries in raw_cycles.items():
+            pairs.extend((f"{a} ({arch})", b) for a, b in entries)
     else:
-        failed_table = "<p>Nothing is failing.</p>"
-
-    cycles = status.get("cycles") or []
+        pairs.extend(raw_cycles)
     cycle_list = ("<ul>" + "".join(
-        f"<li>{esc(a)} &harr; {esc(b)}</li>" for a, b in cycles) + "</ul>") if cycles else ""
+        f"<li>{esc(a)} &harr; {esc(b)}</li>" for a, b in pairs) + "</ul>") if pairs else ""
 
+    repo = esc(status.get("autobuild_repo", "vitasdk/vitasdk-autobuild"))
+    blocks = "".join(
+        f"""<pre><code>[{esc(world.get('staging_repository', 'vita-staging'))}]
+SigLevel = Never
+Server = https://github.com/{repo}/releases/download/staging</code></pre>"""
+        for world in worlds)
     staging = f"""
 <h2>Staging repository</h2>
 <p>Packages marked <em>built</em> and <em>built, held back</em> are also available from a
 staging pacman repository. It can contain partial results of a rebuild, so packages
 in it may be broken from time to time. To use it, add this above the other repositories
 in <code>$VITASDK/etc/pacman.conf</code>:</p>
-<pre><code>[vita-staging]
-SigLevel = Never
-Server = https://github.com/{esc(status.get('autobuild_repo', 'vitasdk/vitasdk-autobuild'))}/releases/download/staging</code></pre>
+{blocks}
 """
 
     return page("Build status - VitaSDK packages", f"""
 <h1>Build status</h1>
-<p class="lede">Core <code>{esc(status.get('core_snapshot', ''))}</code>,
+<p class="lede">{" · ".join(f"{esc(w['arch'])} on <code>{esc(w['core'])}</code>" for w in worlds)},
 recipes at <code>{esc((status.get('packages_revision') or '')[:12])}</code>.</p>
 <table>{rows}</table>
 <h2>Workers</h2>
 {job_table}
 <h2>Failures</h2>
 {failed_table}
-{"<h2>Dependency cycles</h2>" + cycle_list if cycles else ""}
+{"<h2>Dependency cycles</h2>" + cycle_list if pairs else ""}
 {staging}
 """)
 
@@ -300,6 +377,9 @@ th { color: var(--muted); font-weight: 600; font-size: 13px; }
 .badge.ok { color: var(--ok); } .badge.bad { color: var(--bad); }
 .badge.hold { color: var(--hold); } .badge.wait { color: var(--wait); }
 .tally { margin-right: 1rem; color: var(--muted); font-size: 13px; }
+.world { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px;
+         margin-right: .6rem; color: var(--fg); }
+.absent { color: var(--muted); font-size: 12px; }
 .pill { display: inline-block; padding: .1rem .5rem; margin: 0 .3rem .3rem 0;
         background: var(--chip); border-radius: 999px; text-decoration: none; font-size: 13px; }
 .note { background: var(--chip); padding: .6rem .8rem; border-radius: 6px; }
