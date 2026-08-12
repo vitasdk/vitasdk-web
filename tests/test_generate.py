@@ -120,6 +120,34 @@ class TestEmptyStatus(unittest.TestCase):
             written = generate.generate(status, directory)
         self.assertIn("index.html", written)
 
+class TestMissingStatus(unittest.TestCase):
+
+    def test_a_missing_status_file_is_not_a_failure(self):
+        # While the autobuilder is being set up there is no status file. That
+        # is nothing to render, not a failed render, and the two must not look
+        # the same to CI.
+        import io
+        import contextlib
+        import urllib.error
+        from unittest import mock
+
+        error = urllib.error.HTTPError("https://example/status.json", 404, "Not Found", {}, None)
+        output = io.StringIO()
+        with mock.patch("urllib.request.urlopen", side_effect=error):
+            with contextlib.redirect_stdout(output):
+                code = generate.main(["generate", "--status", "vitasdk/vitasdk-autobuild"])
+        self.assertEqual(code, 2)
+        self.assertIn("No status file published yet", output.getvalue())
+
+    def test_a_real_http_error_still_fails(self):
+        import urllib.error
+        from unittest import mock
+
+        error = urllib.error.HTTPError("https://example/status.json", 500, "Boom", {}, None)
+        with mock.patch("urllib.request.urlopen", side_effect=error):
+            with self.assertRaises(SystemExit):
+                generate.main(["generate", "--status", "vitasdk/vitasdk-autobuild"])
+
 
 if __name__ == "__main__":
     unittest.main()

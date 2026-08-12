@@ -12,6 +12,7 @@ import os
 import shutil
 import sys
 import time
+import urllib.error
 import urllib.request
 from typing import Any
 
@@ -43,14 +44,29 @@ def esc(value: object) -> str:
     return html.escape(str(value), quote=True)
 
 
+class StatusNotPublished(Exception):
+    """The autobuilder has not published a status file yet.
+
+    Not an error while the autobuilder is being set up: there is simply
+    nothing to render, which is different from failing to render it.
+    """
+
+
 def load_status(source: str) -> dict[str, Any]:
     if os.path.exists(source):
         with open(source, encoding="utf-8") as handle:
             return json.load(handle)
     url = source if source.startswith("http") else STATUS_URL.format(repo=source)
     print(f"Fetching {url}", flush=True)
-    with urllib.request.urlopen(url, timeout=60) as response:  # noqa: S310 - fixed scheme
-        return json.loads(response.read().decode())
+    try:
+        with urllib.request.urlopen(url, timeout=60) as response:  # noqa: S310 - fixed scheme
+            return json.loads(response.read().decode())
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            raise StatusNotPublished(url) from None
+        raise SystemExit(f"ERROR: cannot read {url}: HTTP {e.code}") from None
+    except urllib.error.URLError as e:
+        raise SystemExit(f"ERROR: cannot reach {url}: {e.reason}") from None
 
 
 def counts(packages: list[dict[str, Any]]) -> dict[str, int]:
@@ -322,7 +338,14 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--output", default="_site", help="directory to write")
     args = parser.parse_args(argv[1:])
 
-    status = load_status(args.status)
+    try:
+        status = load_status(args.status)
+    except StatusNotPublished as e:
+        # Exit code 2 says "nothing published yet" so that setting the site up
+        # before the first build is not reported as a broken deployment.
+        print(f"::notice::No status file published yet at {e}, nothing to build")
+        return 2
+
     written = generate(status, args.output)
     print(f"Wrote {len(written)} files to {args.output}")
     return 0
