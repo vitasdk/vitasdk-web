@@ -10,10 +10,11 @@ on:
     types: [status_updated]
   push:
     branches: [main]
-  # Disabled until the autobuilder publishes its first status file:
-  # until then every run would fail fetching it.
-  # schedule:
-  #   - cron: '*/30 * * * *'
+  # The autobuilder does not know this repository exists: it publishes a
+  # status file and this picks it up. Half an hour is the longest the site can
+  # lag behind a build, and a run with nothing new to say costs a minute.
+  schedule:
+    - cron: '*/30 * * * *'
 
 permissions: {}
 
