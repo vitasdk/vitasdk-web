@@ -6,6 +6,7 @@ that GitHub Pages can serve: no hosting, no credentials, no operations.
 """
 
 import argparse
+import calendar
 import html
 import json
 import os
@@ -84,6 +85,19 @@ def ago(seconds: float | None, now: float | None = None) -> str:
     return "on " + time.strftime("%Y-%m-%d", time.gmtime(seconds))
 
 
+def when(iso: str, now: float | None = None) -> str:
+    """A GitHub timestamp in the same words as everything else on the site."""
+
+    if not iso:
+        return "unknown"
+    try:
+        stamp = calendar.timegm(time.strptime(iso, "%Y-%m-%dT%H:%M:%SZ"))
+    except ValueError:
+        # Better to show the raw value than to hide a snapshot over a format.
+        return iso
+    return ago(stamp, now)
+
+
 def worlds_of(status: dict[str, Any]) -> list[dict[str, Any]]:
     """The targets the catalogue is built for, newest schema or older one."""
 
@@ -135,6 +149,7 @@ def page(title: str, *, body: str, depth: int = 0, generated_at: float | None = 
   <nav>
     <a href="{root}index.html">Catalogue</a>
     <a href="{root}updates.html">Recently built</a>
+    <a href="{root}snapshots.html">Snapshots</a>
     <a href="{root}status.html">Build status</a>
     <a href="{root}api/status.json">API</a>
   </nav>
@@ -190,6 +205,11 @@ def render_index(status: dict[str, Any]) -> str:
             f'<td class="desc">{esc(package.get("description", ""))}</td>'
             f'</tr>')
 
+    published_tag = status.get("published_tag", "")
+    in_repository = ('<a href="snapshots.html" title="Versions in '
+                     f'{esc(published_tag)}">In {esc(published_tag.replace("packages-snapshot-", ""))}</a>'
+                     ) if published_tag else '<a href="snapshots.html">In repository</a>'
+
     built_against = ", ".join(
         f'<code>{esc(w["core"])}</code>' + (f' ({esc(w["arch"])})' if len(worlds) > 1 else "")
         for w in worlds)
@@ -213,7 +233,7 @@ from <a href="https://github.com/{esc(status.get("packages_repo", ""))}">{esc(st
   <span id="count" class="count"></span>
 </div>
 <table id="packages">
-<thead><tr><th>Package</th><th>Version</th><th>In repository</th>{headers}<th>Description</th></tr></thead>
+<thead><tr><th>Package</th><th>Version</th><th>{in_repository}</th>{headers}<th>Description</th></tr></thead>
 <tbody>
 {chr(10).join(rows)}
 </tbody>
@@ -292,7 +312,7 @@ def render_package(package: dict[str, Any], status: dict[str, Any]) -> str:
 <p class="lede">{esc(package.get('description', ''))}</p>
 <table class="facts">
 <tr><th>Recipe version</th><td>{esc(package['version'])}</td></tr>
-<tr><th>In the repository</th><td>{esc(package.get('repo_version') or '—')}</td></tr>
+<tr><th>In the repository</th><td>{esc(package.get('repo_version') or '—')}{f" &middot; <a href=\"../snapshots.html\">{esc(status.get('published_tag', ''))}</a>" if package.get('repo_version') and status.get('published_tag') else ""}</td></tr>
 <tr><th>Provides</th><td>{binaries}</td></tr>
 <tr><th>Licence</th><td>{licenses}</td></tr>
 </table>
@@ -344,6 +364,47 @@ def render_updates(status: dict[str, Any]) -> str:
 <p class="lede">What the autobuilder has produced most recently. A package only
 reappears here when its recipe changes, or when something it links against was
 rebuilt after it.</p>
+{body}
+""")
+
+
+def render_snapshots(status: dict[str, Any]) -> str:
+    """The published snapshots, which are the only history there is.
+
+    Nothing is archived to produce this: the releases themselves are immutable
+    and each one carries the core it was built against, so the list is read
+    back from what was published.
+    """
+
+    snapshots = status.get("published_snapshots") or []
+    repo = status.get("snapshot_repo", "")
+    current = status.get("published_tag", "")
+
+    if not snapshots:
+        body = ("<p>Nothing has been published yet. Packages that are built sit "
+                "in the staging repository until a snapshot is cut.</p>")
+    else:
+        rows = ""
+        for entry in snapshots:
+            tag = entry.get("tag", "")
+            link = (f'<a href="https://github.com/{esc(repo)}/releases/tag/{esc(tag)}">'
+                    f'{esc(tag)}</a>') if repo else esc(tag)
+            mark = ' <span class="badge ok">current</span>' if tag == current else ""
+            revision = entry.get("packages_revision", "")
+            rows += (f'<tr><td>{link}{mark}</td>'
+                     f'<td>{esc(when(entry.get("published_at", "")))}</td>'
+                     f'<td class="k">{esc(entry.get("core_snapshot", "") or "—")}</td>'
+                     f'<td class="k">{esc(revision[:7] if revision else "—")}</td></tr>')
+        body = (f"<table><thead><tr><th>Snapshot</th><th>Published</th>"
+                f"<th>Built against</th><th>Recipes</th></tr></thead>"
+                f"<tbody>{rows}</tbody></table>")
+
+    return page("Snapshots - VitaSDK packages", generated_at=status.get("generated_at"), body=f"""
+<h1>Published snapshots</h1>
+<p class="lede">Each one is an immutable pacman repository. They are what a
+channel points at, so an installation can be reproduced exactly by naming one:
+nothing in a published snapshot ever changes, and a newer core means a new
+snapshot rather than an edit to an old one.</p>
 {body}
 """)
 
@@ -507,6 +568,7 @@ def generate(status: dict[str, Any], output_dir: str) -> list[str]:
     write("index.html", render_index(status))
     write("status.html", render_status(status))
     write("updates.html", render_updates(status))
+    write("snapshots.html", render_snapshots(status))
     write("api/status.json", json.dumps(status, indent=2) + "\n")
     for package in status["packages"]:
         write(os.path.join("package", f"{package['name']}.html"),

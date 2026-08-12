@@ -333,5 +333,57 @@ class TestFiltering(unittest.TestCase):
         self.assertIn("lossless data-compression", index.lower())
 
 
+class TestSnapshots(unittest.TestCase):
+    """The published snapshots are the only history the site can show."""
+
+    def status(self, **extra):
+        base = {"generated_at": 1786600000, "worlds": STATUS["worlds"], "packages": [],
+                "snapshot_repo": "vitasdk/vitasdk-autobuild"}
+        base.update(extra)
+        return base
+
+    def test_a_snapshot_links_to_its_release_and_names_its_core(self):
+        html = generate.render_snapshots(self.status(
+            published_tag="packages-snapshot-20260812.1.1",
+            published_snapshots=[{"tag": "packages-snapshot-20260812.1.1",
+                                  "published_at": "2026-08-12T18:47:27Z",
+                                  "core_snapshot": "sdk-snapshot-20260812.565.1",
+                                  "packages_revision": "c3ab29788f379a824f648c8b"}]))
+        self.assertIn("https://github.com/vitasdk/vitasdk-autobuild/releases/tag/"
+                      "packages-snapshot-20260812.1.1", html)
+        self.assertIn("sdk-snapshot-20260812.565.1", html)
+        self.assertIn("c3ab297", html)
+        self.assertIn("current", html)
+
+    def test_nothing_published_says_so_instead_of_an_empty_table(self):
+        html = generate.render_snapshots(self.status())
+        self.assertIn("Nothing has been published yet", html)
+        self.assertNotIn("<table>", html)
+
+    def test_an_unreadable_date_does_not_hide_the_snapshot(self):
+        html = generate.render_snapshots(self.status(
+            published_snapshots=[{"tag": "packages-snapshot-1",
+                                  "published_at": "whenever"}]))
+        self.assertIn("packages-snapshot-1", html)
+        self.assertIn("whenever", html)
+
+    def test_the_repository_column_names_the_snapshot(self):
+        html = generate.render_index(self.status(
+            published_tag="packages-snapshot-20260812.1.1",
+            packages=[]))
+        self.assertIn("In 20260812.1.1", html)
+        self.assertIn('href="snapshots.html"', html)
+
+    def test_without_a_snapshot_the_column_keeps_its_generic_name(self):
+        html = generate.render_index(self.status(packages=[]))
+        self.assertIn("In repository", html)
+
+    def test_the_page_is_generated(self):
+        with tempfile.TemporaryDirectory() as output:
+            written = generate.generate(self.status(), output)
+        self.assertIn("snapshots.html", written)
+
+
+
 if __name__ == "__main__":
     unittest.main()
