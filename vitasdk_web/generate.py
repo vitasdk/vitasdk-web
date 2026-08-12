@@ -69,6 +69,21 @@ def load_status(source: str) -> dict[str, Any]:
         raise SystemExit(f"ERROR: cannot reach {url}: {e.reason}") from None
 
 
+def ago(seconds: float | None, now: float | None = None) -> str:
+    """How long ago something happened, in words."""
+
+    if not seconds:
+        return "unknown"
+    delta = max(0, int((now if now is not None else time.time()) - seconds))
+    if delta < 90:
+        return "just now"
+    for size, unit in ((60, "minute"), (3600, "hour"), (86400, "day")):
+        count = delta // size
+        if count < (60 if unit == "minute" else 48 if unit == "hour" else 30):
+            return f"{count} {unit}{'' if count == 1 else 's'} ago"
+    return "on " + time.strftime("%Y-%m-%d", time.gmtime(seconds))
+
+
 def worlds_of(status: dict[str, Any]) -> list[dict[str, Any]]:
     """The targets the catalogue is built for, newest schema or older one."""
 
@@ -99,9 +114,13 @@ def counts(packages: list[dict[str, Any]], world: str,
     return result
 
 
-def page(title: str, body: str, depth: int = 0) -> str:
+def page(title: str, *, body: str, depth: int = 0, generated_at: float | None = None) -> str:
     root = "../" * depth
-    generated = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime())
+    if generated_at:
+        generated = (f"{time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime(generated_at))} "
+                     f"({ago(generated_at)})")
+    else:
+        generated = "an unknown time ago"
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -115,6 +134,7 @@ def page(title: str, body: str, depth: int = 0) -> str:
   <a class="brand" href="{root}index.html">VitaSDK packages</a>
   <nav>
     <a href="{root}index.html">Catalogue</a>
+    <a href="{root}updates.html">Recently built</a>
     <a href="{root}status.html">Build status</a>
     <a href="{root}api/status.json">API</a>
   </nav>
@@ -122,7 +142,7 @@ def page(title: str, body: str, depth: int = 0) -> str:
 <main>
 {body}
 </main>
-<footer>Generated {esc(generated)} from the autobuilder's status file.</footer>
+<footer>Status published {esc(generated)}.</footer>
 </body>
 </html>
 """
@@ -159,8 +179,10 @@ def render_index(status: dict[str, Any]) -> str:
         for world in worlds:
             build = builds.get(world["arch"])
             cells += f"<td>{status_badge(build['status']) if build else '<span class=\"absent\">&mdash;</span>'}</td>"
+        haystack = f'{package["name"]} {package.get("description", "")}'.lower()
         rows.append(
-            f'<tr data-name="{esc(package["name"])}">'
+            f'<tr data-name="{esc(package["name"])}" data-search="{esc(haystack)}" '
+            f'data-worlds="{esc(" ".join(builds))}">'
             f'<td><a href="package/{esc(package["name"])}.html">{esc(package["name"])}</a></td>'
             f'<td class="version">{esc(package["version"])}</td>'
             f'<td class="version">{repo_version}</td>'
@@ -172,27 +194,55 @@ def render_index(status: dict[str, Any]) -> str:
         f'<code>{esc(w["core"])}</code>' + (f' ({esc(w["arch"])})' if len(worlds) > 1 else "")
         for w in worlds)
 
-    return page("VitaSDK packages", f"""
+    if len(worlds) > 1:
+        options = "".join(f'<option value="{esc(w["arch"])}">{esc(w["arch"])}</option>'
+                          for w in worlds)
+        world_filter = (f'<select id="world" aria-label="Target"><option value="">'
+                        f'All targets</option>{options}</select>')
+    else:
+        world_filter = ""
+
+    return page("VitaSDK packages", generated_at=status.get("generated_at"), body=f"""
 <h1>Package catalogue</h1>
 <p class="lede">{len(packages)} packages built against {built_against}
 from <a href="https://github.com/{esc(status.get("packages_repo", ""))}">{esc(status.get("packages_repo", ""))}</a>.</p>
 {"".join(summaries)}
-<input id="filter" type="search" placeholder="Filter packages" autocomplete="off">
+<div class="controls">
+  <input id="filter" type="search" placeholder="Filter by name or description" autocomplete="off">
+  {world_filter}
+  <span id="count" class="count"></span>
+</div>
 <table id="packages">
 <thead><tr><th>Package</th><th>Version</th><th>In repository</th>{headers}<th>Description</th></tr></thead>
 <tbody>
 {chr(10).join(rows)}
 </tbody>
 </table>
+<p id="empty" class="empty" hidden>No package matches that.</p>
 <script>
 const filter = document.getElementById('filter');
+const world = document.getElementById('world');
+const count = document.getElementById('count');
+const empty = document.getElementById('empty');
 const rows = Array.from(document.querySelectorAll('#packages tbody tr'));
-filter.addEventListener('input', () => {{
+
+function apply() {{
   const needle = filter.value.trim().toLowerCase();
+  const target = world ? world.value : '';
+  let shown = 0;
   for (const row of rows) {{
-    row.hidden = needle !== '' && !row.dataset.name.toLowerCase().includes(needle);
+    const matchesText = needle === '' || row.dataset.search.includes(needle);
+    const matchesWorld = target === '' || row.dataset.worlds.split(' ').includes(target);
+    row.hidden = !(matchesText && matchesWorld);
+    if (!row.hidden) shown++;
   }}
-}});
+  count.textContent = shown + ' of ' + rows.length;
+  empty.hidden = shown !== 0;
+}}
+
+filter.addEventListener('input', apply);
+if (world) world.addEventListener('change', apply);
+apply();
 </script>
 """)
 
@@ -237,7 +287,7 @@ def render_package(package: dict[str, Any], status: dict[str, Any]) -> str:
     binaries = ", ".join(esc(name) for name in package.get("binaries", []))
     licenses = ", ".join(esc(name) for name in package.get("licenses", [])) or "&mdash;"
 
-    return page(f"{package['name']} - VitaSDK packages", f"""
+    return page(f"{package['name']} - VitaSDK packages", generated_at=status.get("generated_at"), depth=1, body=f"""
 <h1>{esc(package['name'])}</h1>
 <p class="lede">{esc(package.get('description', ''))}</p>
 <table class="facts">
@@ -255,7 +305,47 @@ def render_package(package: dict[str, Any], status: dict[str, Any]) -> str:
 <h2>Needed by</h2>
 {links(package.get('rdepends', []))}
 <p><a href="https://github.com/{esc(status.get('packages_repo', ''))}/blob/HEAD/{esc(package['name'])}/VITABUILD">Recipe</a></p>
-""", depth=1)
+""")
+
+
+def recently_built(status: dict[str, Any], limit: int = 60) -> list[dict[str, Any]]:
+    """Packages by build time, newest first, across every world."""
+
+    worlds = worlds_of(status)
+    entries = []
+    for package in status["packages"]:
+        for world in worlds:
+            build = builds_of(package, worlds).get(world["arch"]) or {}
+            if build.get("built_at"):
+                entries.append({"package": package, "world": world["arch"],
+                                "built_at": build["built_at"],
+                                "downloads": build.get("downloads", 0)})
+    entries.sort(key=lambda entry: entry["built_at"], reverse=True)
+    return entries[:limit]
+
+
+def render_updates(status: dict[str, Any]) -> str:
+    entries = recently_built(status)
+    if not entries:
+        body = "<p>Nothing has been built yet.</p>"
+    else:
+        rows = "".join(
+            f'<tr><td><a href="package/{esc(e["package"]["name"])}.html">'
+            f'{esc(e["package"]["name"])}</a></td>'
+            f'<td class="version">{esc(e["package"]["version"])}</td>'
+            f'<td class="k">{esc(e["world"])}</td>'
+            f'<td>{esc(ago(e["built_at"]))}</td>'
+            f'<td class="version">{e["downloads"]}</td></tr>' for e in entries)
+        body = (f"<table><thead><tr><th>Package</th><th>Version</th><th>Target</th>"
+                f"<th>Built</th><th>Downloads</th></tr></thead><tbody>{rows}</tbody></table>")
+
+    return page("Recently built - VitaSDK packages", generated_at=status.get("generated_at"), body=f"""
+<h1>Recently built</h1>
+<p class="lede">What the autobuilder has produced most recently. A package only
+reappears here when its recipe changes, or when something it links against was
+rebuilt after it.</p>
+{body}
+""")
 
 
 def render_status(status: dict[str, Any]) -> str:
@@ -288,13 +378,18 @@ def render_status(status: dict[str, Any]) -> str:
             build = builds_of(package, worlds).get(world["arch"])
             if not build or build["status"] != "failed-to-build":
                 continue
+            details = build.get("details") or {}
+            logs = " ".join(
+                f'<a href="{esc(url)}">{esc(label)}</a>'
+                for label, url in (details.get("urls") or {}).items()) or "&mdash;"
             failed_rows += (
                 f'<tr><td><a href="package/{esc(package["name"])}.html">{esc(package["name"])}</a></td>'
                 f'<td class="k">{esc(world["arch"])}</td>'
                 f'<td class="version">{esc(package["version"])}</td>'
-                f'<td>{esc((build.get("details") or {}).get("desc") or "")}</td></tr>')
+                f'<td>{logs}</td>'
+                f'<td>{esc(details.get("desc") or "")}</td></tr>')
     failed_table = (f"<table><thead><tr><th>Package</th><th>Target</th><th>Version</th>"
-                    f"<th>Detail</th></tr></thead><tbody>{failed_rows}</tbody></table>"
+                    f"<th>Log</th><th>Detail</th></tr></thead><tbody>{failed_rows}</tbody></table>"
                     ) if failed_rows else "<p>Nothing is failing.</p>"
 
     raw_cycles = status.get("cycles") or []
@@ -322,7 +417,7 @@ in <code>$VITASDK/etc/pacman.conf</code>:</p>
 {blocks}
 """
 
-    return page("Build status - VitaSDK packages", f"""
+    return page("Build status - VitaSDK packages", generated_at=status.get("generated_at"), body=f"""
 <h1>Build status</h1>
 <p class="lede">{" · ".join(f"{esc(w['arch'])} on <code>{esc(w['core'])}</code>" for w in worlds)},
 recipes at <code>{esc((status.get('packages_revision') or '')[:12])}</code>.</p>
@@ -361,9 +456,16 @@ h2 { font-size: 1.1rem; margin: 1.8rem 0 .5rem; }
 a { color: var(--accent); }
 code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
 pre { background: var(--chip); padding: .8rem 1rem; border-radius: 6px; overflow-x: auto; }
-input[type=search] { width: 100%; padding: .55rem .7rem; margin: .5rem 0 1rem;
+.controls { display: flex; gap: .6rem; align-items: center; margin: .5rem 0 1rem;
+            flex-wrap: wrap; }
+input[type=search] { flex: 1 1 16rem; padding: .55rem .7rem;
        border: 1px solid var(--line); border-radius: 6px; background: var(--bg);
        color: var(--fg); font-size: 15px; }
+select { padding: .55rem .7rem; border: 1px solid var(--line); border-radius: 6px;
+         background: var(--bg); color: var(--fg); font-size: 15px; }
+.count { color: var(--muted); font-size: 13px; white-space: nowrap; }
+.empty { color: var(--muted); }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 table { width: 100%; border-collapse: collapse; margin-bottom: 1rem; display: block;
         overflow-x: auto; }
 th, td { text-align: left; padding: .45rem .6rem; border-bottom: 1px solid var(--line);
@@ -404,6 +506,7 @@ def generate(status: dict[str, Any], output_dir: str) -> list[str]:
     write("style.css", STYLE)
     write("index.html", render_index(status))
     write("status.html", render_status(status))
+    write("updates.html", render_updates(status))
     write("api/status.json", json.dumps(status, indent=2) + "\n")
     for package in status["packages"]:
         write(os.path.join("package", f"{package['name']}.html"),

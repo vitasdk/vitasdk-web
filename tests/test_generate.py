@@ -218,6 +218,120 @@ class TestTwoWorlds(unittest.TestCase):
                                          TWO_WORLDS["worlds"]),
                          {"failed-to-build": 1})
 
+class TestTimeInWords(unittest.TestCase):
+
+    def test_scales_from_minutes_to_days(self):
+        now = 1_000_000_000
+        self.assertEqual(generate.ago(now - 5, now), "just now")
+        self.assertEqual(generate.ago(now - 100, now), "1 minute ago")
+        self.assertEqual(generate.ago(now - 60 * 45, now), "45 minutes ago")
+        self.assertEqual(generate.ago(now - 3600 * 3, now), "3 hours ago")
+        self.assertEqual(generate.ago(now - 86400 * 2, now), "2 days ago")
+
+    def test_old_enough_gets_a_date(self):
+        now = 1_000_000_000
+        self.assertTrue(generate.ago(now - 86400 * 90, now).startswith("on 2"))
+
+    def test_nothing_known(self):
+        self.assertEqual(generate.ago(None), "unknown")
+
+
+class TestFailureDetails(unittest.TestCase):
+    """Triage starts on the status page, so the log has to be reachable there."""
+
+    def setUp(self):
+        self.directory = tempfile.mkdtemp()
+        generate.generate(STATUS, self.directory)
+        with open(os.path.join(self.directory, "status.html"), encoding="utf-8") as handle:
+            self.status = handle.read()
+
+    def test_the_failure_row_links_the_build_log(self):
+        self.assertIn("https://github.com/run/2", self.status)
+        self.assertIn("<th>Log</th>", self.status)
+
+    def test_the_failure_row_names_the_target(self):
+        self.assertIn("<th>Target</th>", self.status)
+
+
+class TestFreshness(unittest.TestCase):
+    """A stale copy of the site must not look like a live one."""
+
+    def test_pages_report_when_the_status_was_published(self):
+        status = dict(STATUS, generated_at=1_000_000_000)
+        with tempfile.TemporaryDirectory() as directory:
+            generate.generate(status, directory)
+            with open(os.path.join(directory, "index.html"), encoding="utf-8") as handle:
+                index = handle.read()
+        self.assertIn("Status published", index)
+        self.assertIn("2001-09-09", index)
+
+    def test_a_status_without_a_timestamp_says_so(self):
+        with tempfile.TemporaryDirectory() as directory:
+            generate.generate(STATUS, directory)
+            with open(os.path.join(directory, "index.html"), encoding="utf-8") as handle:
+                index = handle.read()
+        self.assertIn("unknown time", index)
+
+
+class TestRecentlyBuilt(unittest.TestCase):
+    """msys2 calls this Repo Updates: what has changed lately."""
+
+    def status(self):
+        return dict(STATUS, packages=[
+            dict(STATUS["packages"][0],
+                 builds={"vita": {"status": "finished", "details": {}, "built_at": 200.0,
+                                  "downloads": 5}}),
+            dict(STATUS["packages"][1], name="libpng",
+                 builds={"vita": {"status": "finished", "details": {}, "built_at": 300.0,
+                                  "downloads": 1}}),
+        ])
+
+    def test_newest_first(self):
+        entries = generate.recently_built(self.status())
+        self.assertEqual([e["package"]["name"] for e in entries], ["libpng", "zlib"])
+
+    def test_packages_never_built_are_absent(self):
+        self.assertEqual(generate.recently_built(STATUS), [])
+
+    def test_the_page_exists_and_lists_them(self):
+        with tempfile.TemporaryDirectory() as directory:
+            written = generate.generate(self.status(), directory)
+            self.assertIn("updates.html", written)
+            with open(os.path.join(directory, "updates.html"), encoding="utf-8") as handle:
+                page = handle.read()
+        self.assertIn("libpng", page)
+        self.assertIn("<th>Downloads</th>", page)
+
+
+class TestFiltering(unittest.TestCase):
+
+    def test_rows_carry_what_the_filter_needs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            generate.generate(TWO_WORLDS, directory)
+            with open(os.path.join(directory, "index.html"), encoding="utf-8") as handle:
+                index = handle.read()
+        self.assertIn('data-search=', index)
+        self.assertIn('data-worlds="vita vita-musl"', index)
+
+    def test_a_target_selector_appears_only_with_more_than_one(self):
+        with tempfile.TemporaryDirectory() as directory:
+            generate.generate(TWO_WORLDS, directory)
+            with open(os.path.join(directory, "index.html"), encoding="utf-8") as handle:
+                many = handle.read()
+        with tempfile.TemporaryDirectory() as directory:
+            generate.generate(STATUS, directory)
+            with open(os.path.join(directory, "index.html"), encoding="utf-8") as handle:
+                one = handle.read()
+        self.assertIn('id="world"', many)
+        self.assertNotIn('id="world"', one)
+
+    def test_the_description_is_searchable_too(self):
+        with tempfile.TemporaryDirectory() as directory:
+            generate.generate(STATUS, directory)
+            with open(os.path.join(directory, "index.html"), encoding="utf-8") as handle:
+                index = handle.read()
+        self.assertIn("lossless data-compression", index.lower())
+
 
 if __name__ == "__main__":
     unittest.main()
