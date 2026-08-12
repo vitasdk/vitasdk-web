@@ -10,8 +10,10 @@ on:
     types: [status_updated]
   push:
     branches: [main]
-  schedule:
-    - cron: '*/30 * * * *'
+  # Disabled until the autobuilder publishes its first status file:
+  # until then every run would fail fetching it.
+  # schedule:
+  #   - cron: '*/30 * * * *'
 
 permissions: {}
 
