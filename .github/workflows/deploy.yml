@@ -1,0 +1,55 @@
+name: deploy
+
+# The catalogue is read-only, so it is generated and served as files. The
+# autobuilder does not have to know this repository exists: the schedule picks
+# up whatever status file it published last, and a dispatch makes it immediate.
+
+on:
+  workflow_dispatch:
+  repository_dispatch:
+    types: [status_updated]
+  push:
+    branches: [main]
+  schedule:
+    - cron: '*/30 * * * *'
+
+permissions: {}
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Run the tests
+        run: python3 -m unittest discover -t . -s tests
+
+      - name: Generate the catalogue
+        run: python3 -m vitasdk_web.generate --status vitasdk/vitasdk-autobuild --output _site
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
