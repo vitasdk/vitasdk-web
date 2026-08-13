@@ -8,10 +8,12 @@ that GitHub Pages can serve: no hosting, no credentials, no operations.
 import argparse
 import calendar
 import html
+import io
 import json
 import os
 import shutil
 import sys
+import tarfile
 import time
 import urllib.error
 import urllib.request
@@ -138,6 +140,50 @@ def fetch_json(url: str) -> dict[str, Any] | None:
         return None
 
 
+def read_database(data: bytes) -> dict[str, dict[str, str]]:
+    """What a published repository contains, from its own pacman database.
+
+    The catalogue describes what is being built now; a snapshot is a
+    different question — what was in it — and the only thing that can answer
+    it is the snapshot itself.
+    """
+
+    entries: dict[str, dict[str, str]] = {}
+    with tarfile.open(fileobj=io.BytesIO(data), mode="r:*") as archive:
+        for member in archive:
+            if not member.isfile() or os.path.basename(member.name) != "desc":
+                continue
+            handle = archive.extractfile(member)
+            if handle is None:
+                continue
+            fields: dict[str, str] = {}
+            key = ""
+            for raw in handle.read().decode("utf-8", "replace").splitlines():
+                line = raw.strip()
+                if line.startswith("%") and line.endswith("%"):
+                    key = line.strip("%")
+                elif line and key:
+                    fields.setdefault(key, line)
+            if "NAME" in fields and "VERSION" in fields:
+                entries[fields["NAME"]] = {
+                    "version": fields["VERSION"],
+                    "description": fields.get("DESC", ""),
+                }
+    return entries
+
+
+def fetch_database(repo: str, tag: str, name: str) -> dict[str, dict[str, str]] | None:
+    """One snapshot's package list. Missing is not fatal: it is one page."""
+
+    url = f"https://github.com/{repo}/releases/download/{tag}/{name}.db"
+    try:
+        with urllib.request.urlopen(url, timeout=60) as response:  # noqa: S310
+            return read_database(response.read())
+    except (urllib.error.URLError, tarfile.TarError, ValueError, TimeoutError):
+        print(f"::warning::cannot read the database of {tag}", flush=True)
+        return None
+
+
 def worlds_of(status: dict[str, Any]) -> list[dict[str, Any]]:
     """The targets the catalogue is built for, newest schema or older one."""
 
@@ -209,9 +255,12 @@ def status_badge(status: str) -> str:
     return f'<span class="badge {kind}">{esc(label)}</span>'
 
 
-def render_index(status: dict[str, Any]) -> str:
+def render_index(status: dict[str, Any],
+                 snapshots: list[dict[str, Any]] | None = None,
+                 series: dict[str, Any] | None = None) -> str:
     packages = status["packages"]
     worlds = worlds_of(status)
+    snapshot_selector = view_selector("building", snapshots or [], series=series)
 
     summaries = []
     for world in worlds:
@@ -278,6 +327,7 @@ from <a href="https://github.com/{esc(status.get("packages_repo", ""))}">{esc(st
 <div class="controls">
   <input id="filter" type="search" placeholder="Filter by name or description" autocomplete="off">
   {world_filter}
+  {snapshot_selector}
   <span id="count" class="count"></span>
 </div>
 <table id="packages">
@@ -495,6 +545,88 @@ SERIES_LABELS = {
 }
 
 
+def snapshot_label(entry: dict[str, Any], series: dict[str, Any] | None = None) -> str:
+    """A snapshot named the way somebody would say it out loud.
+
+    Nobody knows what packages-snapshot-20260813.2.1 is. What they know is
+    which release they are on, and a release is a toolchain: a snapshot
+    belongs to the release whose core its provenance records. One built
+    against a toolchain that no release names cannot be attributed, and
+    saying so is better than guessing.
+    """
+
+    published = when(entry.get("published_at", ""))
+    tag = entry.get("tag", "")
+    for name, item in sorted((series or {}).items()):
+        if item.get("packages") == tag:
+            return f"{name} — {published} (current)"
+    for name, item in sorted((series or {}).items()):
+        if item.get("core") and item["core"] == entry.get("core_snapshot"):
+            return f"{name} — {published}"
+    return f"{published} — earlier toolchain"
+
+
+def view_selector(current: str, snapshots: list[dict[str, Any]], depth: int = 0,
+                  series: dict[str, Any] | None = None) -> str:
+    """Lets a reader ask the other question: not what is being built, but what
+    a published snapshot contains."""
+
+    if not snapshots:
+        return ""
+    root = "../" * depth
+    options = f'<option value="{root}index.html"'
+    options += ' selected' if current == "building" else ''
+    options += '>Building now</option>'
+    for entry in snapshots:
+        tag = entry.get("tag", "")
+        if not tag:
+            continue
+        # The tag stays reachable as the title, because it is the thing that
+        # makes a build reproducible; it is just not what a person reads.
+        options += f'<option value="{root}snapshot/{esc(tag)}.html" title="{esc(tag)}"'
+        options += ' selected' if current == tag else ''
+        options += f'>{esc(snapshot_label(entry, series))}</option>'
+    return (f'<label class="view">Showing '
+            f'<select id="view" aria-label="Which repository to show">{options}</select>'
+            f'</label>'
+            f'<script>document.getElementById("view").addEventListener("change", '
+            f'function (event) {{ location.href = event.target.value; }});</script>')
+
+
+def render_snapshot(entry: dict[str, Any], contents: dict[str, dict[str, str]],
+                    status: dict[str, Any], snapshots: list[dict[str, Any]],
+                    series: dict[str, Any] | None = None) -> str:
+    """What one published snapshot contains, read from the snapshot itself."""
+
+    tag = entry.get("tag", "")
+    serving = [name for name, item in (series or {}).items()
+               if item.get("packages") == tag]
+    rows = "".join(
+        f'<tr><td>{esc(name)}</td><td class="version">{esc(item["version"])}</td>'
+        f'<td class="desc">{esc(item["description"])}</td></tr>'
+        for name, item in sorted(contents.items()))
+    served_by = ""
+    if serving:
+        served_by = ("<p>Served by " + ", ".join(f"<code>{esc(n)}</code>" for n in serving)
+                     + ". Installing from that release installs exactly this.</p>")
+
+    return page(f"{snapshot_label(entry, series)} - VitaSDK packages",
+                generated_at=status.get("generated_at"),
+                depth=1, body=f"""
+<h1>{esc(snapshot_label(entry, series))}</h1>
+<p class="eyebrow"><code>{esc(tag)}</code></p>
+<p class="lede">{len(contents)} packages, built against
+<code>{esc(entry.get("core_snapshot", "an unrecorded toolchain"))}</code>. This
+list is read from the snapshot's own database, so it is what you get, not what
+was intended.</p>
+{served_by}
+<div class="controls">{view_selector(tag, snapshots, depth=1, series=series)}</div>
+<div class="scroll"><table>
+<thead><tr><th>Package</th><th>Version</th><th>Description</th></tr></thead>
+<tbody>{rows}</tbody></table></div>
+""")
+
+
 def render_releases(status: dict[str, Any],
                     series: dict[str, Any] | None = None) -> str:
     """What a person can actually ask for, which is a release and not a tag."""
@@ -653,6 +785,8 @@ select { padding: .55rem .7rem; border: 1px solid var(--line); border-radius: 6p
          background: var(--bg); color: var(--fg); font-size: 15px; }
 .count { color: var(--muted); font-size: 13px; white-space: nowrap; }
 .empty { color: var(--muted); }
+.view { color: var(--muted); font-size: 0.9rem; }
+.view select { margin-left: 0.35rem; }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 table { width: 100%; border-collapse: collapse; margin-bottom: 1rem; display: block;
         overflow-x: auto; }
@@ -695,8 +829,28 @@ def generate(status: dict[str, Any], output_dir: str,
             handle.write(content)
         written.append(relative)
 
+    snapshots = list(status.get("published_snapshots") or [])
+    repository = worlds_of(status)[0].get("repository", "vita")
+    store = status.get("snapshot_repo", "")
+
+    # One page per snapshot, read from its own database. Bounded by what the
+    # status file lists, and a snapshot that cannot be read costs one page
+    # rather than the whole site.
+    listed = []
+    if store:
+        os.makedirs(os.path.join(output_dir, "snapshot"), exist_ok=True)
+        for entry in snapshots:
+            contents = fetch_database(store, entry.get("tag", ""), repository)
+            if contents:
+                listed.append((entry, contents))
+
+    available = [entry for entry, _ in listed]
+
     write("style.css", STYLE)
-    write("index.html", render_index(status))
+    write("index.html", render_index(status, available, series))
+    for entry, contents in listed:
+        write(os.path.join("snapshot", f"{entry['tag']}.html"),
+              render_snapshot(entry, contents, status, available, series))
     write("status.html", render_status(status))
     write("updates.html", render_updates(status))
     write("snapshots.html", render_snapshots(status, series))

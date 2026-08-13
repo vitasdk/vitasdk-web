@@ -474,5 +474,74 @@ class TestReleases(unittest.TestCase):
 
 
 
+class TestSnapshotBrowsing(unittest.TestCase):
+    """What a published snapshot contains is a different question from what
+    is being built, and only the snapshot can answer it."""
+
+    def database(self, entries):
+        import io, tarfile
+        buffer = io.BytesIO()
+        with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
+            for name, version, desc in entries:
+                body = (f"%NAME%\n{name}\n\n%VERSION%\n{version}\n\n"
+                        f"%DESC%\n{desc}\n").encode()
+                info = tarfile.TarInfo(f"{name}-{version}/desc")
+                info.size = len(body)
+                archive.addfile(info, io.BytesIO(body))
+        return buffer.getvalue()
+
+    def test_a_database_is_read_the_way_pacman_wrote_it(self):
+        data = self.database([("zlib", "1.3.2-2", "A compression library")])
+        self.assertEqual(generate.read_database(data),
+                         {"zlib": {"version": "1.3.2-2",
+                                   "description": "A compression library"}})
+
+    def test_the_selector_offers_both_questions(self):
+        html = generate.view_selector("building", [{"tag": "packages-snapshot-1"}])
+        self.assertIn("Building now", html)
+        self.assertIn("packages-snapshot-1", html)
+        self.assertIn("selected", html)
+
+    def test_a_snapshot_reads_as_the_release_it_belongs_to(self):
+        # Nobody knows what packages-snapshot-20260813.2.1 is; what they know
+        # is which release they are on. A release is a toolchain, so the
+        # provenance is what attributes a snapshot to one.
+        series = {"2026.09": {"core": "core-1", "packages": "snap-2"}}
+        current = {"tag": "snap-2", "core_snapshot": "core-1",
+                   "published_at": "2026-08-13T07:30:57Z"}
+        older = {"tag": "snap-1", "core_snapshot": "core-1",
+                 "published_at": "2026-08-13T01:00:00Z"}
+        foreign = {"tag": "snap-0", "core_snapshot": "core-0",
+                   "published_at": "2026-08-12T01:00:00Z"}
+        self.assertIn("2026.09", generate.snapshot_label(current, series))
+        self.assertIn("current", generate.snapshot_label(current, series))
+        self.assertIn("2026.09", generate.snapshot_label(older, series))
+        self.assertNotIn("current", generate.snapshot_label(older, series))
+        self.assertIn("earlier toolchain", generate.snapshot_label(foreign, series))
+
+    def test_the_tag_stays_reachable_because_it_is_what_reproduces_a_build(self):
+        html = generate.view_selector(
+            "building", [{"tag": "snap-2", "core_snapshot": "core-1"}],
+            series={"2026.09": {"core": "core-1", "packages": "snap-2"}})
+        self.assertIn('title="snap-2"', html)
+
+    def test_no_snapshots_means_no_selector_at_all(self):
+        self.assertEqual(generate.view_selector("building", []), "")
+
+    def test_a_snapshot_page_lists_what_is_in_it(self):
+        entry = {"tag": "packages-snapshot-1", "core_snapshot": "core-1"}
+        contents = {"zlib": {"version": "1.3.2-2", "description": "Compression"}}
+        html = generate.render_snapshot(entry, contents, {"generated_at": 1786600000},
+                                        [entry], {"2026.09": {"packages": "packages-snapshot-1"}})
+        self.assertIn("zlib", html)
+        self.assertIn("1.3.2-2", html)
+        self.assertIn("core-1", html)
+        self.assertIn("2026.09", html)
+
+    def test_an_unreadable_snapshot_costs_one_page_not_the_site(self):
+        self.assertIsNone(generate.fetch_database("vitasdk/nope", "nope", "vita"))
+
+
+
 if __name__ == "__main__":
     unittest.main()
