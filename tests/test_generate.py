@@ -417,5 +417,54 @@ class TestDeprecation(unittest.TestCase):
 
 
 
+class TestReleases(unittest.TestCase):
+    """The catalogue has to describe what a person can ask for."""
+
+    SERIES = {
+        "2026.09": {"status": "supported", "summary": "First stable release",
+                    "sequence": 4, "core": "sdk-snapshot-20260812.568.1",
+                    "packages": "packages-snapshot-20260813.2.1", "deprecated": {}},
+        "nightly": {"status": "development", "summary": "Rebuilt continuously",
+                    "sequence": 41, "core": "sdk-snapshot-20260812.568.1",
+                    "packages": "packages-snapshot-20260813.2.1", "deprecated": {}},
+    }
+
+    def status(self):
+        return {"generated_at": 1786600000, "worlds": STATUS["worlds"],
+                "packages": [], "published_snapshots": [
+                    {"tag": "packages-snapshot-20260813.2.1",
+                     "published_at": "2026-08-13T07:30:57Z",
+                     "core_snapshot": "sdk-snapshot-20260812.568.1"}],
+                "snapshot_repo": "vitasdk/vitasdk-autobuild"}
+
+    def test_a_release_is_named_with_what_it_serves(self):
+        html = generate.render_releases(self.status(), self.SERIES)
+        self.assertIn("2026.09", html)
+        self.assertIn("Supported", html)
+        self.assertIn("packages-snapshot-20260813.2.1", html)
+        self.assertIn("VITASDK_CHANNEL=2026.09", html)
+
+    def test_no_published_series_is_not_an_error(self):
+        html = generate.render_releases(self.status(), {})
+        self.assertIn("No release series are published yet", html)
+
+    def test_a_snapshot_says_which_release_serves_it(self):
+        # Being the newest and being the one people install are different
+        # facts, and only the second matters to a reader.
+        html = generate.render_snapshots(self.status(), self.SERIES)
+        self.assertIn(">2026.09<", html)
+
+    def test_the_page_is_generated_and_linked(self):
+        with tempfile.TemporaryDirectory() as output:
+            written = generate.generate(self.status(), output, self.SERIES)
+            self.assertIn("releases.html", written)
+            with open(os.path.join(output, "index.html"), encoding="utf-8") as handle:
+                self.assertIn('href="releases.html"', handle.read())
+
+    def test_unreachable_channels_do_not_stop_the_build(self):
+        self.assertEqual(generate.load_channels("https://127.0.0.1:9/channels"), {})
+
+
+
 if __name__ == "__main__":
     unittest.main()

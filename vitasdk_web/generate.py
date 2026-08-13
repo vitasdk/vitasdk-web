@@ -98,6 +98,46 @@ def when(iso: str, now: float | None = None) -> str:
     return ago(stamp, now)
 
 
+CHANNELS_URL = "https://vitasdk.github.io/channels"
+
+
+def load_channels(base: str) -> dict[str, Any]:
+    """The release series and what each of them currently serves.
+
+    Read from where the client reads it, because that is the only thing that
+    decides what anybody installs; the catalogue describes what was built,
+    which is not the same question.
+
+    Absent is not an error. Until an index is published there are no series to
+    describe, and a catalogue that refuses to build for that reason would be
+    worse than one that says nothing.
+    """
+
+    index = fetch_json(f"{base}/index.json")
+    if not index:
+        return {}
+    series = {}
+    for name, entry in sorted(index.get("channels", {}).items()):
+        manifest = fetch_json(f"{base}/{name}.json") or {}
+        series[name] = {
+            "status": entry.get("status", "unknown"),
+            "summary": entry.get("summary", ""),
+            "sequence": manifest.get("sequence"),
+            "core": (manifest.get("core") or {}).get("release", ""),
+            "packages": (manifest.get("packages") or {}).get("release", ""),
+            "deprecated": (manifest.get("packages") or {}).get("deprecated", {}),
+        }
+    return series
+
+
+def fetch_json(url: str) -> dict[str, Any] | None:
+    try:
+        with urllib.request.urlopen(url, timeout=30) as response:  # noqa: S310
+            return json.loads(response.read().decode())
+    except (urllib.error.URLError, ValueError, TimeoutError):
+        return None
+
+
 def worlds_of(status: dict[str, Any]) -> list[dict[str, Any]]:
     """The targets the catalogue is built for, newest schema or older one."""
 
@@ -149,6 +189,7 @@ def page(title: str, *, body: str, depth: int = 0, generated_at: float | None = 
   <nav>
     <a href="{root}index.html">Catalogue</a>
     <a href="{root}updates.html">Recently built</a>
+    <a href="{root}releases.html">Releases</a>
     <a href="{root}snapshots.html">Snapshots</a>
     <a href="{root}status.html">Build status</a>
     <a href="{root}api/status.json">API</a>
@@ -384,7 +425,7 @@ rebuilt after it.</p>
 """)
 
 
-def render_snapshots(status: dict[str, Any]) -> str:
+def render_snapshots(status: dict[str, Any], series: dict[str, Any] | None = None) -> str:
     """The published snapshots, which are the only history there is.
 
     Nothing is archived to produce this: the releases themselves are immutable
@@ -411,6 +452,11 @@ def render_snapshots(status: dict[str, Any]) -> str:
             link = (f'<a href="https://github.com/{esc(repo)}/releases/tag/{esc(tag)}">'
                     f'{esc(tag)}</a>') if repo else esc(tag)
             mark = ' <span class="badge ok">current</span>' if tag == current else ""
+            # Being the newest snapshot and being the one people install are
+            # different facts, and only the second one matters to a reader.
+            for name, entry in (series or {}).items():
+                if entry.get("packages") == tag:
+                    mark += f' <span class="badge wait">{esc(name)}</span>'
             revision = entry.get("packages_revision", "")
             rows += (f'<tr><td>{link}{mark}</td>'
                      f'<td>{esc(when(entry.get("published_at", "")))}</td>'
@@ -427,6 +473,55 @@ channel points at, so an installation can be reproduced exactly by naming one:
 nothing in a published snapshot ever changes, and a newer core means a new
 snapshot rather than an edit to an old one.</p>
 {body}
+""")
+
+
+SERIES_LABELS = {
+    "supported": ("Supported", "ok"),
+    "development": ("Development", "wait"),
+    "deprecated": ("Deprecated", "hold"),
+    "end-of-life": ("Ended", "bad"),
+}
+
+
+def render_releases(status: dict[str, Any],
+                    series: dict[str, Any] | None = None) -> str:
+    """What a person can actually ask for, which is a release and not a tag."""
+
+    series = series or {}
+    if not series:
+        body = ("<p>No release series are published yet. Until then the "
+                "catalogue describes what has been built rather than what "
+                "can be installed.</p>")
+    else:
+        rows = ""
+        for name, entry in series.items():
+            label, kind = SERIES_LABELS.get(entry["status"], (entry["status"], "wait"))
+            packages = entry["packages"]
+            link = (f'<a href="snapshots.html">{esc(packages)}</a>'
+                    if packages else "&mdash;")
+            rows += (f'<tr><td><code>{esc(name)}</code></td>'
+                     f'<td><span class="badge {kind}">{esc(label)}</span></td>'
+                     f'<td>{link}</td>'
+                     f'<td class="k">{esc(entry["core"] or "—")}</td>'
+                     f'<td class="desc">{esc(entry["summary"])}</td></tr>')
+        body = (f'<div class="scroll"><table><thead><tr><th>Release</th>'
+                f'<th>Status</th><th>Packages</th><th>Toolchain</th>'
+                f'<th></th></tr></thead><tbody>{rows}</tbody></table></div>')
+
+    first = next(iter(series), "nightly")
+    return page("Releases - VitaSDK packages", generated_at=status.get("generated_at"), body=f"""
+<h1>Releases</h1>
+<p class="lede">A release fixes the toolchain — the compiler, newlib and the
+Vita headers — and packages keep improving inside it. It is what you name when
+you install, and the only thing that changes it is asking for another one.</p>
+{body}
+<h2>Installing one</h2>
+<pre><code>git clone https://github.com/vitasdk/vdpm &amp;&amp; cd vdpm
+VITASDK_CHANNEL={esc(first)} ./bootstrap-vitasdk.sh</code></pre>
+<p>Afterwards, <code>vdpm status</code> says which release an installation
+follows, and <code>vdpm channels</code> lists these same series from the
+client.</p>
 """)
 
 
@@ -574,7 +669,8 @@ th { color: var(--muted); font-weight: 600; font-size: 13px; }
 """
 
 
-def generate(status: dict[str, Any], output_dir: str) -> list[str]:
+def generate(status: dict[str, Any], output_dir: str,
+             series: dict[str, Any] | None = None) -> list[str]:
     if os.path.exists(output_dir):
         shutil.rmtree(output_dir)
     os.makedirs(os.path.join(output_dir, "package"), exist_ok=True)
@@ -592,7 +688,8 @@ def generate(status: dict[str, Any], output_dir: str) -> list[str]:
     write("index.html", render_index(status))
     write("status.html", render_status(status))
     write("updates.html", render_updates(status))
-    write("snapshots.html", render_snapshots(status))
+    write("snapshots.html", render_snapshots(status, series))
+    write("releases.html", render_releases(status, series))
     write("api/status.json", json.dumps(status, indent=2) + "\n")
     for package in status["packages"]:
         write(os.path.join("package", f"{package['name']}.html"),
@@ -605,6 +702,8 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--status", default="vitasdk/vitasdk-autobuild",
                         help="path to status.json, a URL, or the autobuild repository")
     parser.add_argument("--output", default="_site", help="directory to write")
+    parser.add_argument("--channels", default=CHANNELS_URL,
+                        help="where the release series are published")
     args = parser.parse_args(argv[1:])
 
     try:
@@ -615,7 +714,9 @@ def main(argv: list[str]) -> int:
         print(f"::notice::No status file published yet at {e}, nothing to build")
         return 2
 
-    written = generate(status, args.output)
+    # Read from where the client reads them; missing simply means no series
+    # are published yet, which is not a reason to fail a deployment.
+    written = generate(status, args.output, load_channels(args.channels))
     print(f"Wrote {len(written)} files to {args.output}")
     return 0
 
