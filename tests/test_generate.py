@@ -372,11 +372,19 @@ class TestSnapshots(unittest.TestCase):
         self.assertIn("packages-snapshot-1", html)
         self.assertIn("whenever", html)
 
-    def test_the_repository_column_names_the_snapshot(self):
+    def test_the_repository_column_names_the_release_serving_it(self):
+        # A tag is what reproduces a build; a release is what a person
+        # recognises, so the column says the release when one serves it.
+        status = self.status(published_tag="packages-snapshot-20260812.1.1", packages=[])
+        html = generate.render_index(status, series={
+            "2026.09": {"packages": "packages-snapshot-20260812.1.1"}})
+        self.assertIn("In 2026.09", html)
+        self.assertIn("packages-snapshot-20260812.1.1", html)
+
+    def test_an_unattributed_snapshot_still_says_something_useful(self):
         html = generate.render_index(self.status(
-            published_tag="packages-snapshot-20260812.1.1",
-            packages=[]))
-        self.assertIn("In 20260812.1.1", html)
+            published_tag="packages-snapshot-20260812.1.1", packages=[]))
+        self.assertIn("In the last snapshot", html)
         self.assertIn('href="snapshots.html"', html)
 
     def test_without_a_snapshot_the_column_keeps_its_generic_name(self):
@@ -409,7 +417,7 @@ class TestDeprecation(unittest.TestCase):
         status = self.status("Python 2 is unsupported; use cpython3")
         html = generate.render_package(status["packages"][0], status)
         self.assertIn("Deprecated.", html)
-        self.assertLess(html.index("Deprecated."), html.index("In the repository"))
+        self.assertLess(html.index("Deprecated."), html.index("Published"))
 
     def test_a_normal_package_is_not_marked(self):
         html = generate.render_index(self.status(""))

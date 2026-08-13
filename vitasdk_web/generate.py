@@ -302,10 +302,19 @@ def render_index(status: dict[str, Any],
             f'<td class="desc">{esc(package.get("description", ""))}</td>'
             f'</tr>')
 
+    # Named as the release, for the same reason the snapshot selector is: a
+    # tag is what reproduces a build, not what a person recognises.
     published_tag = status.get("published_tag", "")
-    in_repository = ('<a href="snapshots.html" title="Versions in '
-                     f'{esc(published_tag)}">In {esc(published_tag.replace("packages-snapshot-", ""))}</a>'
-                     ) if published_tag else '<a href="snapshots.html">In repository</a>'
+    serving = next((name for name, item in sorted((series or {}).items())
+                    if item.get("packages") == published_tag), "")
+    if serving:
+        in_repository = (f'<a href="releases.html" title="Versions in {esc(published_tag)}">'
+                         f'In {esc(serving)}</a>')
+    elif published_tag:
+        in_repository = (f'<a href="snapshots.html" title="Versions in {esc(published_tag)}">'
+                         f'In the last snapshot</a>')
+    else:
+        in_repository = '<a href="snapshots.html">In repository</a>'
 
     built_against = ", ".join(
         f'<code>{esc(w["core"])}</code>' + (f' ({esc(w["arch"])})' if len(worlds) > 1 else "")
@@ -365,7 +374,8 @@ apply();
 """)
 
 
-def render_package(package: dict[str, Any], status: dict[str, Any]) -> str:
+def render_package(package: dict[str, Any], status: dict[str, Any],
+                   series: dict[str, Any] | None = None) -> str:
     def links(names: list[str]) -> str:
         if not names:
             return "<p>None.</p>"
@@ -408,6 +418,17 @@ def render_package(package: dict[str, Any], status: dict[str, Any]) -> str:
     # Above everything else, because it changes whether the rest is worth
     # reading. It says do not start something new on this, not that it is
     # gone: what already depends on it keeps working.
+    # The same rule as everywhere else: say the release, keep the tag within
+    # reach for whoever needs to reproduce something.
+    published_in = ""
+    if package.get("repo_version") and status.get("published_tag"):
+        tag = status["published_tag"]
+        name = next((n for n, item in sorted((series or {}).items())
+                     if item.get("packages") == tag), "")
+        published_in = (f' &middot; <a href="../releases.html" title="{esc(tag)}">{esc(name)}</a>'
+                        if name else
+                        f' &middot; <a href="../snapshots.html">{esc(tag)}</a>')
+
     notice = ""
     if package.get("deprecated"):
         notice = (f'<p class="deprecated"><strong>Deprecated.</strong> '
@@ -419,7 +440,7 @@ def render_package(package: dict[str, Any], status: dict[str, Any]) -> str:
 {notice}
 <table class="facts">
 <tr><th>Recipe version</th><td>{esc(package['version'])}</td></tr>
-<tr><th>In the repository</th><td>{esc(package.get('repo_version') or '—')}{f" &middot; <a href=\"../snapshots.html\">{esc(status.get('published_tag', ''))}</a>" if package.get('repo_version') and status.get('published_tag') else ""}</td></tr>
+<tr><th>Published</th><td>{esc(package.get('repo_version') or '—')}{published_in}</td></tr>
 <tr><th>Provides</th><td>{binaries}</td></tr>
 <tr><th>Licence</th><td>{licenses}</td></tr>
 </table>
@@ -858,7 +879,7 @@ def generate(status: dict[str, Any], output_dir: str,
     write("api/status.json", json.dumps(status, indent=2) + "\n")
     for package in status["packages"]:
         write(os.path.join("package", f"{package['name']}.html"),
-              render_package(package, status))
+              render_package(package, status, series))
     return written
 
 
