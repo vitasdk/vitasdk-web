@@ -390,5 +390,32 @@ class TestSnapshots(unittest.TestCase):
 
 
 
+class TestDeprecation(unittest.TestCase):
+    """A deprecated package is marked where somebody would pick it."""
+
+    def status(self, deprecated):
+        return {"generated_at": 1786600000, "worlds": STATUS["worlds"],
+                "packages_repo": "vitasdk/packages", "published_snapshots": [],
+                "packages": [{"name": "cpython", "version": "2.7-1",
+                              "description": "Python 2", "deprecated": deprecated,
+                              "builds": {"vita": {"status": "finished", "details": {}}}}]}
+
+    def test_the_catalogue_marks_it(self):
+        html = generate.render_index(self.status("Python 2 is unsupported; use cpython3"))
+        self.assertIn(">deprecated<", html)
+        self.assertIn("use cpython3", html)
+
+    def test_the_package_page_leads_with_it(self):
+        status = self.status("Python 2 is unsupported; use cpython3")
+        html = generate.render_package(status["packages"][0], status)
+        self.assertIn("Deprecated.", html)
+        self.assertLess(html.index("Deprecated."), html.index("In the repository"))
+
+    def test_a_normal_package_is_not_marked(self):
+        html = generate.render_index(self.status(""))
+        self.assertNotIn("deprecated", html)
+
+
+
 if __name__ == "__main__":
     unittest.main()

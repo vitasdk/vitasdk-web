@@ -194,11 +194,18 @@ def render_index(status: dict[str, Any]) -> str:
         for world in worlds:
             build = builds.get(world["arch"])
             cells += f"<td>{status_badge(build['status']) if build else '<span class=\"absent\">&mdash;</span>'}</td>"
+        # Marked where people go looking for something to use, which is the
+        # only place a deprecation changes anybody's mind.
+        deprecated = package.get("deprecated", "")
+        name_cell = f'<a href="package/{esc(package["name"])}.html">{esc(package["name"])}</a>'
+        if deprecated:
+            name_cell += (f' <span class="badge stale" title="{esc(deprecated)}">'
+                          f'deprecated</span>')
         haystack = f'{package["name"]} {package.get("description", "")}'.lower()
         rows.append(
             f'<tr data-name="{esc(package["name"])}" data-search="{esc(haystack)}" '
             f'data-worlds="{esc(" ".join(builds))}">'
-            f'<td><a href="package/{esc(package["name"])}.html">{esc(package["name"])}</a></td>'
+            f'<td>{name_cell}</td>'
             f'<td class="version">{esc(package["version"])}</td>'
             f'<td class="version">{repo_version}</td>'
             f'{cells}'
@@ -307,9 +314,18 @@ def render_package(package: dict[str, Any], status: dict[str, Any]) -> str:
     binaries = ", ".join(esc(name) for name in package.get("binaries", []))
     licenses = ", ".join(esc(name) for name in package.get("licenses", [])) or "&mdash;"
 
+    # Above everything else, because it changes whether the rest is worth
+    # reading. It says do not start something new on this, not that it is
+    # gone: what already depends on it keeps working.
+    notice = ""
+    if package.get("deprecated"):
+        notice = (f'<p class="deprecated"><strong>Deprecated.</strong> '
+                  f'{esc(package["deprecated"])}</p>')
+
     return page(f"{package['name']} - VitaSDK packages", generated_at=status.get("generated_at"), depth=1, body=f"""
 <h1>{esc(package['name'])}</h1>
 <p class="lede">{esc(package.get('description', ''))}</p>
+{notice}
 <table class="facts">
 <tr><th>Recipe version</th><td>{esc(package['version'])}</td></tr>
 <tr><th>In the repository</th><td>{esc(package.get('repo_version') or '—')}{f" &middot; <a href=\"../snapshots.html\">{esc(status.get('published_tag', ''))}</a>" if package.get('repo_version') and status.get('published_tag') else ""}</td></tr>
@@ -544,6 +560,9 @@ th { color: var(--muted); font-weight: 600; font-size: 13px; }
          background: var(--chip); white-space: nowrap; }
 .badge.ok { color: var(--ok); } .badge.bad { color: var(--bad); }
 .badge.hold { color: var(--hold); } .badge.wait { color: var(--wait); }
+.badge.stale { color: var(--hold); border-color: var(--hold); }
+.deprecated { border-left: 3px solid var(--hold); padding: 0.6rem 0.9rem;
+  margin: 0 0 1rem; background: color-mix(in srgb, var(--hold) 8%, transparent); }
 .tally { margin-right: 1rem; color: var(--muted); font-size: 13px; }
 .world { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px;
          margin-right: .6rem; color: var(--fg); }
