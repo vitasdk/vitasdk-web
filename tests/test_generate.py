@@ -448,6 +448,14 @@ class TestReleases(unittest.TestCase):
         html = generate.render_releases(self.status(), {})
         self.assertIn("No release series are published yet", html)
 
+    def test_a_snapshot_a_release_serves_is_never_missing(self):
+        # The status file can be older than the snapshot a release points at.
+        status = self.status()
+        status["published_snapshots"] = []
+        html = generate.render_snapshots(status, self.SERIES)
+        self.assertIn("packages-snapshot-20260813.2.1", html)
+        self.assertIn(">2026.09<", html)
+
     def test_a_snapshot_says_which_release_serves_it(self):
         # Being the newest and being the one people install are different
         # facts, and only the second matters to a reader.

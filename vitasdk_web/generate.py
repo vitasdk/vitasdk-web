@@ -433,7 +433,18 @@ def render_snapshots(status: dict[str, Any], series: dict[str, Any] | None = Non
     back from what was published.
     """
 
-    snapshots = status.get("published_snapshots") or []
+    snapshots = list(status.get("published_snapshots") or [])
+    # A snapshot cut after the last status was written is not in that list,
+    # and a release pointing at a row the table does not have is exactly the
+    # thing a reader cannot make sense of. What is known about it comes from
+    # the manifest that names it.
+    known = {entry.get("tag") for entry in snapshots}
+    for name, entry in sorted((series or {}).items()):
+        tag = entry.get("packages")
+        if tag and tag not in known:
+            snapshots.insert(0, {"tag": tag, "published_at": "",
+                                 "core_snapshot": entry.get("core", "")})
+            known.add(tag)
     repo = status.get("snapshot_repo", "")
     current = status.get("published_tag", "")
 
