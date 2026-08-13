@@ -255,12 +255,56 @@ def status_badge(status: str) -> str:
     return f'<span class="badge {kind}">{esc(label)}</span>'
 
 
+# More than a few side by side stops being a table anybody reads.
+MAXIMUM_RELEASE_COLUMNS = 3
+
+
+def release_columns(series: dict[str, Any] | None,
+                    contents: dict[str, dict[str, dict[str, str]]] | None
+                    ) -> list[tuple[str, dict[str, str]]]:
+    """One column per release, with the versions that release actually serves.
+
+    Read from each release's own database rather than from a single "newest
+    published" figure. With one release the two agree; with two, the single
+    figure would name one release and show the other's versions.
+    """
+
+    # Only releases that are still receiving packages get a column. A series
+    # that has ended is history, and history belongs on its own page: with
+    # thirty releases this table would otherwise be thirty columns wide.
+    alive = [(name, item) for name, item in sorted((series or {}).items())
+             if item.get("status") in ("supported", "development")]
+
+    # Releases serving the same snapshot are one column, not two identical
+    # ones: right after cutting a release, that is every release.
+    grouped: dict[str, list[str]] = {}
+    for name, item in alive:
+        tag = item.get("packages", "")
+        if tag and (contents or {}).get(tag):
+            grouped.setdefault(tag, []).append(name)
+
+    columns = []
+    for tag, names in list(grouped.items())[:MAXIMUM_RELEASE_COLUMNS]:
+        packages = contents[tag]
+        columns.append((", ".join(names),
+                        {n: entry["version"] for n, entry in packages.items()}))
+    if len(grouped) > MAXIMUM_RELEASE_COLUMNS:
+        print(f"::notice::{len(grouped)} maintained releases, showing "
+              f"{MAXIMUM_RELEASE_COLUMNS} in the catalogue", flush=True)
+    return columns
+
+
 def render_index(status: dict[str, Any],
                  snapshots: list[dict[str, Any]] | None = None,
-                 series: dict[str, Any] | None = None) -> str:
+                 series: dict[str, Any] | None = None,
+                 contents: dict[str, dict[str, dict[str, str]]] | None = None) -> str:
     packages = status["packages"]
     worlds = worlds_of(status)
     snapshot_selector = view_selector("building", snapshots or [], series=series)
+    # One column per release, each showing what that release serves. A tag is
+    # what reproduces a build; a release is what a person recognises, so the
+    # tag lives in the title.
+    columns = release_columns(series, contents)
 
     summaries = []
     for world in worlds:
@@ -278,7 +322,12 @@ def render_index(status: dict[str, Any],
 
     rows = []
     for package in packages:
-        repo_version = package.get("repo_version") or "&mdash;"
+        if columns:
+            published = "".join(
+                f'<td class="version">{esc(versions.get(package["name"], "—"))}</td>'
+                for _, versions in columns)
+        else:
+            published = f'<td class="version">{esc(package.get("repo_version") or "—")}</td>' 
         builds = builds_of(package, worlds)
         cells = ""
         for world in worlds:
@@ -297,24 +346,20 @@ def render_index(status: dict[str, Any],
             f'data-worlds="{esc(" ".join(builds))}">'
             f'<td>{name_cell}</td>'
             f'<td class="version">{esc(package["version"])}</td>'
-            f'<td class="version">{repo_version}</td>'
+            f'{published}'
             f'{cells}'
             f'<td class="desc">{esc(package.get("description", ""))}</td>'
             f'</tr>')
 
-    # Named as the release, for the same reason the snapshot selector is: a
-    # tag is what reproduces a build, not what a person recognises.
-    published_tag = status.get("published_tag", "")
-    serving = next((name for name, item in sorted((series or {}).items())
-                    if item.get("packages") == published_tag), "")
-    if serving:
-        in_repository = (f'<a href="releases.html" title="Versions in {esc(published_tag)}">'
-                         f'In {esc(serving)}</a>')
-    elif published_tag:
-        in_repository = (f'<a href="snapshots.html" title="Versions in {esc(published_tag)}">'
-                         f'In the last snapshot</a>')
+    if columns:
+        in_repository = "".join(
+            f'<th><a href="releases.html">In {esc(name)}</a></th>'
+            for name, _ in columns)
+    elif status.get("published_tag"):
+        in_repository = (f'<th><a href="snapshots.html" title="Versions in '
+                         f'{esc(status["published_tag"])}">In the last snapshot</a></th>')
     else:
-        in_repository = '<a href="snapshots.html">In repository</a>'
+        in_repository = '<th><a href="snapshots.html">In repository</a></th>'
 
     built_against = ", ".join(
         f'<code>{esc(w["core"])}</code>' + (f' ({esc(w["arch"])})' if len(worlds) > 1 else "")
@@ -340,7 +385,7 @@ from <a href="https://github.com/{esc(status.get("packages_repo", ""))}">{esc(st
   <span id="count" class="count"></span>
 </div>
 <table id="packages">
-<thead><tr><th>Package</th><th>Version</th><th>{in_repository}</th>{headers}<th>Description</th></tr></thead>
+<thead><tr><th>Package</th><th>Version</th>{in_repository}{headers}<th>Description</th></tr></thead>
 <tbody>
 {chr(10).join(rows)}
 </tbody>
@@ -866,9 +911,10 @@ def generate(status: dict[str, Any], output_dir: str,
                 listed.append((entry, contents))
 
     available = [entry for entry, _ in listed]
+    contents_by_tag = {entry["tag"]: contents for entry, contents in listed}
 
     write("style.css", STYLE)
-    write("index.html", render_index(status, available, series))
+    write("index.html", render_index(status, available, series, contents_by_tag))
     for entry, contents in listed:
         write(os.path.join("snapshot", f"{entry['tag']}.html"),
               render_snapshot(entry, contents, status, available, series))

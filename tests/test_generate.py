@@ -374,12 +374,46 @@ class TestSnapshots(unittest.TestCase):
 
     def test_the_repository_column_names_the_release_serving_it(self):
         # A tag is what reproduces a build; a release is what a person
-        # recognises, so the column says the release when one serves it.
-        status = self.status(published_tag="packages-snapshot-20260812.1.1", packages=[])
-        html = generate.render_index(status, series={
-            "2026.09": {"packages": "packages-snapshot-20260812.1.1"}})
+        # recognises. The versions come from that release's own database,
+        # not from a single "newest published" figure that would name one
+        # release and show another's versions.
+        status = self.status(published_tag="packages-snapshot-20260812.1.1",
+                             packages=[{"name": "zlib", "version": "1.3.2-2",
+                                        "builds": {"vita": {"status": "finished",
+                                                            "details": {}}}}])
+        html = generate.render_index(
+            status,
+            series={"2026.09": {"packages": "snap-1", "status": "supported"}},
+            contents={"snap-1": {"zlib": {"version": "1.3.1-1", "description": ""}}})
         self.assertIn("In 2026.09", html)
-        self.assertIn("packages-snapshot-20260812.1.1", html)
+        self.assertIn("1.3.1-1", html)
+
+    def test_a_release_that_has_ended_takes_no_column(self):
+        # With thirty releases this table would otherwise be thirty columns
+        # wide. History belongs on the snapshot pages.
+        columns = generate.release_columns(
+            {"old": {"packages": "snap-0", "status": "end-of-life"},
+             "new": {"packages": "snap-1", "status": "supported"}},
+            {"snap-0": {"zlib": {"version": "1.0", "description": ""}},
+             "snap-1": {"zlib": {"version": "2.0", "description": ""}}})
+        self.assertEqual([name for name, _ in columns], ["new"])
+
+    def test_releases_serving_the_same_snapshot_share_a_column(self):
+        # Right after cutting a release, every release serves the same
+        # snapshot, and two identical columns say nothing twice.
+        columns = generate.release_columns(
+            {"2026.09": {"packages": "snap-1", "status": "supported"},
+             "nightly": {"packages": "snap-1", "status": "development"}},
+            {"snap-1": {"zlib": {"version": "1.0", "description": ""}}})
+        self.assertEqual([name for name, _ in columns], ["2026.09, nightly"])
+
+    def test_the_number_of_columns_is_bounded(self):
+        series = {f"2026.{n:02d}": {"packages": f"snap-{n}", "status": "supported"}
+                  for n in range(30)}
+        contents = {f"snap-{n}": {"zlib": {"version": "1.0", "description": ""}}
+                    for n in range(30)}
+        columns = generate.release_columns(series, contents)
+        self.assertEqual(len(columns), generate.MAXIMUM_RELEASE_COLUMNS)
 
     def test_an_unattributed_snapshot_still_says_something_useful(self):
         html = generate.render_index(self.status(
