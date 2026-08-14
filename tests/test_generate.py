@@ -529,6 +529,28 @@ class TestReleases(unittest.TestCase):
             with open(os.path.join(output, "index.html"), encoding="utf-8") as handle:
                 self.assertIn('href="releases.html"', handle.read())
 
+    def test_a_release_gets_a_column_even_if_the_status_never_listed_it(self):
+        # The status file is written per series, so the snapshot a release
+        # serves is missing from it whenever another series produced the file.
+        # Reading only that list left the catalogue saying "In nightly" and
+        # nothing about the release people actually install.
+        status = self.status()
+        status["published_snapshots"] = []
+        status["snapshot_repo"] = "vitasdk/vitasdk-autobuild"
+        original = generate.fetch_database
+        generate.fetch_database = lambda repo, tag, name: (
+            {"zlib": {"version": "1.3.2-2", "description": ""}} if tag else None)
+        try:
+            with tempfile.TemporaryDirectory() as output:
+                generate.generate(status, output, self.SERIES)
+                with open(os.path.join(output, "index.html"), encoding="utf-8") as handle:
+                    index = handle.read()
+                snapshot_pages = os.listdir(os.path.join(output, "snapshot"))
+        finally:
+            generate.fetch_database = original
+        self.assertIn("In 2026.09", index)
+        self.assertIn("packages-snapshot-20260813.2.1.html", snapshot_pages)
+
     def test_unreachable_channels_do_not_stop_the_build(self):
         self.assertEqual(generate.load_channels("https://127.0.0.1:9/channels"), {})
 
