@@ -581,8 +581,8 @@ def render_snapshots(status: dict[str, Any], series: dict[str, Any] | None = Non
             mark = ' <span class="badge ok">current</span>' if tag == current else ""
             # Being the newest snapshot and being the one people install are
             # different facts, and only the second one matters to a reader.
-            for name, entry in (series or {}).items():
-                if entry.get("packages") == tag:
+            for name, item in (series or {}).items():
+                if item.get("packages") == tag:
                     mark += f' <span class="badge wait">{esc(name)}</span>'
             revision = entry.get("packages_revision", "")
             rows += (f'<tr><td>{link}{mark}</td>'

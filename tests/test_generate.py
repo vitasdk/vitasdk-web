@@ -355,6 +355,24 @@ class TestSnapshots(unittest.TestCase):
         self.assertIn("c3ab297", html)
         self.assertIn("current", html)
 
+    def test_the_release_badge_does_not_swallow_the_other_columns(self):
+        # The loop that badges a snapshot with the release serving it used to
+        # bind over the snapshot it was iterating, so every column read after
+        # it came from a series entry instead and the row rendered empty.
+        html = generate.render_snapshots(
+            self.status(
+                published_tag="packages-snapshot-20260812.1.1",
+                published_snapshots=[{"tag": "packages-snapshot-20260812.1.1",
+                                      "published_at": "2026-08-12T18:47:27Z",
+                                      "core_snapshot": "sdk-snapshot-20260812.565.1",
+                                      "packages_revision": "c3ab29788f379a824f648c8b"}]),
+            {"2026.09": {"status": "supported",
+                         "packages": "packages-snapshot-20260812.1.1"}})
+        self.assertIn(">2026.09<", html)
+        self.assertIn("sdk-snapshot-20260812.565.1", html)
+        self.assertIn("c3ab297", html)
+        self.assertNotIn("unknown", html)
+
     def test_nothing_published_says_so_instead_of_an_empty_table(self):
         html = generate.render_snapshots(self.status(published_snapshots=[]))
         self.assertIn("Nothing has been published yet", html)
