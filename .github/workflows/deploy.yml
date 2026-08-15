@@ -31,7 +31,7 @@ jobs:
     outputs:
       generated: ${{ steps.generate.outputs.generated }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
 
@@ -55,7 +55,7 @@ jobs:
           echo 'generated=true' >> "$GITHUB_OUTPUT"
           exit $status
 
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@v5
         if: steps.generate.outputs.generated == 'true'
         with:
           path: _site
@@ -73,4 +73,4 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
