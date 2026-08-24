@@ -755,9 +755,37 @@ class TestChrome(unittest.TestCase):
         self.assertIn("sdk-snapshot-1", band)
         self.assertIn("2023-11-14", band)
 
-    def test_core_band_without_a_date_says_unknown(self):
+    def test_core_band_without_a_date_says_nothing_about_it(self):
         band = generate.core_band("nightly", {"core": "sdk-snapshot-1"}, None)
-        self.assertIn("an unknown time", band)
+        self.assertIn("sdk-snapshot-1", band)
+        self.assertNotIn("built", band)
+
+    def test_a_bare_link_lands_on_the_newest_supported_series(self):
+        # What the installer picks when nobody names a channel, so that a
+        # command copied from the landing page installs what it says.
+        series = {
+            "2026.02": {"status": "deprecated"},
+            "2026.08": {"status": "supported"},
+            "2026.05": {"status": "supported"},
+            "nightly": {"status": "development"},
+        }
+        self.assertEqual(generate.default_channel_of(series), "2026.08")
+
+    def test_a_bare_link_falls_back_when_nothing_is_supported(self):
+        series = {"nightly": {"status": "development"}}
+        self.assertEqual(generate.default_channel_of(series), "nightly")
+
+    def test_the_install_command_is_one_line_off_the_release(self):
+        snippet = generate.bootstrap_snippet("2026.08", windows=False)
+        self.assertIn("releases/latest/download/bootstrap-vitasdk.sh", snippet)
+        self.assertIn("VITASDK_CHANNEL=2026.08 bash", snippet)
+        self.assertEqual(snippet.count("\n"), 0)
+
+    def test_the_windows_command_saves_the_script_before_running_it(self):
+        # Piping into iex would drop the parameters the installer takes.
+        snippet = generate.bootstrap_snippet("2026.08", windows=True)
+        self.assertIn("bootstrap-vitasdk.ps1", snippet)
+        self.assertNotIn("iex", snippet)
 
     def test_packages_band_finds_the_publish_date(self):
         band = generate.packages_band(

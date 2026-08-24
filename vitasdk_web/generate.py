@@ -97,6 +97,12 @@ def parse_iso(iso: str) -> float | None:
         return None
 
 
+def dash_if_unknown(phrase: str) -> str:
+    """A table says nothing with a dash, the way its other columns do."""
+
+    return "—" if phrase == "unknown" else phrase
+
+
 def when(iso: str, now: float | None = None) -> str:
     """A GitHub timestamp in the same words as everything else on the site."""
 
@@ -221,16 +227,23 @@ def host_label(triple: str) -> str:
     return triple
 
 
+INSTALLER_URL = ("https://github.com/vitasdk/vdpm/releases/latest/download/"
+                 "bootstrap-vitasdk")
+
+
 def bootstrap_snippet(channel: str | None, windows: bool) -> str:
-    """The install command already documented in vdpm's own README."""
+    """One command to paste, from the release the client publishes.
+
+    Windows downloads the script before running it rather than piping into
+    iex: the installer takes parameters, and a piped script cannot.
+    """
 
     if windows:
         set_channel = f'$env:VITASDK_CHANNEL="{esc(channel)}"; ' if channel else ""
-        return (f"git clone https://github.com/vitasdk/vdpm; cd vdpm\n"
+        return (f"irm {INSTALLER_URL}.ps1 -OutFile bootstrap-vitasdk.ps1\n"
                 f"{set_channel}.\\bootstrap-vitasdk.ps1")
     set_channel = f"VITASDK_CHANNEL={esc(channel)} " if channel else ""
-    return (f"git clone https://github.com/vitasdk/vdpm &amp;&amp; cd vdpm\n"
-            f"{set_channel}./bootstrap-vitasdk.sh")
+    return f"curl -fsSL {INSTALLER_URL}.sh | {set_channel}bash"
 
 
 def read_database(data: bytes) -> dict[str, dict[str, str]]:
@@ -362,8 +375,11 @@ def core_band(name: str | None, item: dict[str, Any] | None, built_at: float | N
         return ('<div class="band">No release channel is published yet; nothing to '
                 'download.</div>')
     tag = item.get("core") or "unrecorded"
+    # A core published before the manifest carried a build time says nothing
+    # rather than saying it was built at an unknown time.
+    built = f", built {esc(absolute(built_at))}" if built_at else ""
     return (f'<div class="band">Showing the <strong>{esc(name)}</strong> channel '
-            f'&mdash; core <code>{esc(tag)}</code>, built {esc(absolute(built_at))}.</div>')
+            f'&mdash; core <code>{esc(tag)}</code>{built}.</div>')
 
 
 def packages_band(name: str | None, item: dict[str, Any] | None,
@@ -374,9 +390,10 @@ def packages_band(name: str | None, item: dict[str, Any] | None,
     tag = item.get("packages") or "unrecorded"
     published_at = next((entry.get("published_at", "") for entry in snapshots
                          if entry.get("tag") == tag), "")
+    stamp = parse_iso(published_at)
+    built = f", built {esc(absolute(stamp))}" if stamp else ""
     return (f'<div class="band">Showing the <strong>{esc(name)}</strong> channel '
-            f'&mdash; packages <code>{esc(tag)}</code>, built '
-            f'{esc(absolute(parse_iso(published_at)))}.</div>')
+            f'&mdash; packages <code>{esc(tag)}</code>{built}.</div>')
 
 
 def status_badge(status: str) -> str:
@@ -818,7 +835,7 @@ def render_snapshots_section(status: dict[str, Any], series: dict[str, Any] | No
                     mark += f' <span class="badge wait">{esc(name)}</span>'
             revision = entry.get("packages_revision", "")
             rows += (f'<tr><td>{link}{mark}</td>'
-                     f'<td>{esc(when(entry.get("published_at", "")))}</td>'
+                     f'<td>{esc(dash_if_unknown(when(entry.get("published_at", ""))))}</td>'
                      f'<td class="k">{esc(entry.get("core_snapshot", "") or "—")}</td>'
                      f'<td class="k">{esc(revision[:7] if revision else "—")}</td></tr>')
         body = (f"<table><thead><tr><th>Snapshot</th><th>Published</th>"
@@ -854,14 +871,15 @@ def snapshot_label(entry: dict[str, Any], series: dict[str, Any] | None = None) 
     """
 
     published = when(entry.get("published_at", ""))
+    dated = "" if published == "unknown" else f" — {published}"
     tag = entry.get("tag", "")
     for name, item in sorted((series or {}).items()):
         if item.get("packages") == tag:
-            return f"{name} — {published} (current)"
+            return f"{name}{dated} (current)"
     for name, item in sorted((series or {}).items()):
         if item.get("core") and item["core"] == entry.get("core_snapshot"):
-            return f"{name} — {published}"
-    return f"{published} — earlier toolchain"
+            return f"{name}{dated}"
+    return f"{published} — earlier toolchain" if dated else "earlier toolchain"
 
 
 def render_snapshot(entry: dict[str, Any], contents: dict[str, dict[str, str]],
@@ -1172,15 +1190,16 @@ th { color: var(--muted); font-weight: 600; font-size: 13px; }
 def default_channel_of(series: dict[str, Any]) -> str | None:
     """Which channel a bare link (a package page, the site root) points at.
 
-    A channel still under development is what most visitors want by
-    default; failing that, any published one is better than none.
+    The newest supported series, which is what the installer itself picks
+    when nobody names one: a visitor who copies a command from here has to
+    end up with what that command actually installs.
     """
 
     if not series:
         return None
-    development = next((name for name, item in sorted(series.items())
-                        if item.get("status") == "development"), None)
-    return development or sorted(series)[0]
+    supported = [name for name, item in sorted(series.items(), reverse=True)
+                 if item.get("status") == "supported"]
+    return supported[0] if supported else sorted(series)[0]
 
 
 def generate(status: dict[str, Any], output_dir: str,
