@@ -2,6 +2,7 @@ import json
 import os
 import tempfile
 import unittest
+from unittest import mock
 
 from vitasdk_web import generate
 
@@ -34,6 +35,12 @@ STATUS = {
     "cycles": {"vita": [["a", "b"]]},
 }
 
+# generate() only hits the network when a channel names a snapshot repository
+# or a core repository; STATUS and this SERIES have neither, so tests that
+# use them exercise the real code path without needing a mock.
+ENTRY_POINTS = ("index.html", "downloads.html", "packages.html", "status.html",
+                "style.css", "api/status.json")
+
 
 class TestGenerate(unittest.TestCase):
 
@@ -50,27 +57,26 @@ class TestGenerate(unittest.TestCase):
             self.assertIn(os.path.join("package", f"{name}.html"), self.written)
 
     def test_writes_the_entry_points(self):
-        for name in ("index.html", "status.html", "style.css", "api/status.json"):
+        for name in ENTRY_POINTS:
             self.assertIn(name, self.written)
 
     def test_the_api_is_the_status_file_itself(self):
         self.assertEqual(json.loads(self.read("api/status.json")), STATUS)
 
-    def test_index_lists_every_package(self):
-        index = self.read("index.html")
+    def test_the_catalogue_lists_every_package(self):
+        packages = self.read("packages.html")
         for name in ("zlib", "libpng", "blocked-one"):
-            self.assertIn(f'href="package/{name}.html"', index)
+            self.assertIn(f'href="package/{name}.html"', packages)
 
-    def test_index_shows_both_versions(self):
-        index = self.read("index.html")
-        self.assertIn("1.3.2-2", index)
-        self.assertIn("1.3.2-1", index)
+    def test_the_catalogue_shows_the_recipe_version(self):
+        packages = self.read("packages.html")
+        self.assertIn("1.3.2-2", packages)
 
     def test_descriptions_are_escaped(self):
         # Recipe metadata is not ours and ends up in the page verbatim.
-        index = self.read("index.html")
-        self.assertNotIn("<reference>", index)
-        self.assertIn("&lt;reference&gt;", index)
+        packages = self.read("packages.html")
+        self.assertNotIn("<reference>", packages)
+        self.assertIn("&lt;reference&gt;", packages)
 
     def test_package_page_links_dependencies_both_ways(self):
         zlib = self.read(os.path.join("package", "zlib.html"))
@@ -110,6 +116,9 @@ class TestGenerate(unittest.TestCase):
     def test_every_page_is_theme_aware(self):
         self.assertIn("prefers-color-scheme", self.read("style.css"))
 
+    def test_index_is_the_downloads_page(self):
+        self.assertEqual(self.read("index.html"), self.read("downloads.html"))
+
     def test_counts(self):
         self.assertEqual(generate.counts(STATUS["packages"], "vita", STATUS["worlds"]),
                          {"finished": 1, "failed-to-build": 1, "finished-but-blocked": 1})
@@ -124,6 +133,16 @@ class TestEmptyStatus(unittest.TestCase):
             written = generate.generate(status, directory)
         self.assertIn("index.html", written)
 
+    def test_no_channels_says_so_on_downloads(self):
+        status = {"packages": [], "worlds": [], "packages_repo": "",
+                  "jobs": [], "cycles": {}}
+        with tempfile.TemporaryDirectory() as directory:
+            generate.generate(status, directory)
+            with open(os.path.join(directory, "downloads.html"), encoding="utf-8") as handle:
+                page = handle.read()
+        self.assertIn("No release channel is published yet", page)
+
+
 class TestMissingStatus(unittest.TestCase):
 
     def test_a_missing_status_file_is_not_a_failure(self):
@@ -133,7 +152,6 @@ class TestMissingStatus(unittest.TestCase):
         import io
         import contextlib
         import urllib.error
-        from unittest import mock
 
         error = urllib.error.HTTPError("https://example/status.json", 404, "Not Found", {}, None)
         output = io.StringIO()
@@ -145,12 +163,12 @@ class TestMissingStatus(unittest.TestCase):
 
     def test_a_real_http_error_still_fails(self):
         import urllib.error
-        from unittest import mock
 
         error = urllib.error.HTTPError("https://example/status.json", 500, "Boom", {}, None)
         with mock.patch("urllib.request.urlopen", side_effect=error):
             with self.assertRaises(SystemExit):
                 generate.main(["generate", "--status", "vitasdk/vitasdk-autobuild"])
+
 
 TWO_WORLDS = {
     "schema_version": 2,
@@ -187,10 +205,10 @@ class TestTwoWorlds(unittest.TestCase):
         with open(os.path.join(self.directory, relative), encoding="utf-8") as handle:
             return handle.read()
 
-    def test_the_index_has_a_column_per_world(self):
-        index = self.read("index.html")
-        self.assertIn("<th>vita</th>", index)
-        self.assertIn("<th>vita-musl</th>", index)
+    def test_the_catalogue_has_a_column_per_world(self):
+        packages = self.read("packages.html")
+        self.assertIn("<th>vita</th>", packages)
+        self.assertIn("<th>vita-musl</th>", packages)
 
     def test_a_package_shows_a_different_state_per_world(self):
         page = self.read(os.path.join("package", "zlib.html"))
@@ -218,6 +236,7 @@ class TestTwoWorlds(unittest.TestCase):
                                          TWO_WORLDS["worlds"]),
                          {"failed-to-build": 1})
 
+
 class TestTimeInWords(unittest.TestCase):
 
     def test_scales_from_minutes_to_days(self):
@@ -234,6 +253,12 @@ class TestTimeInWords(unittest.TestCase):
 
     def test_nothing_known(self):
         self.assertEqual(generate.ago(None), "unknown")
+
+    def test_absolute_reads_out_the_full_stamp(self):
+        self.assertEqual(generate.absolute(1_000_000_000), "2001-09-09 01:46 UTC")
+
+    def test_absolute_with_nothing_known(self):
+        self.assertEqual(generate.absolute(None), "an unknown time")
 
 
 class TestFailureDetails(unittest.TestCase):
@@ -293,14 +318,15 @@ class TestRecentlyBuilt(unittest.TestCase):
     def test_packages_never_built_are_absent(self):
         self.assertEqual(generate.recently_built(STATUS), [])
 
-    def test_the_page_exists_and_lists_them(self):
+    def test_the_section_lists_them(self):
         with tempfile.TemporaryDirectory() as directory:
             written = generate.generate(self.status(), directory)
-            self.assertIn("updates.html", written)
-            with open(os.path.join(directory, "updates.html"), encoding="utf-8") as handle:
+            self.assertIn("packages.html", written)
+            with open(os.path.join(directory, "packages.html"), encoding="utf-8") as handle:
                 page = handle.read()
         self.assertIn("libpng", page)
         self.assertIn("<th>Downloads</th>", page)
+        self.assertIn('data-view="updates"', page)
 
 
 class TestFiltering(unittest.TestCase):
@@ -308,19 +334,19 @@ class TestFiltering(unittest.TestCase):
     def test_rows_carry_what_the_filter_needs(self):
         with tempfile.TemporaryDirectory() as directory:
             generate.generate(TWO_WORLDS, directory)
-            with open(os.path.join(directory, "index.html"), encoding="utf-8") as handle:
-                index = handle.read()
-        self.assertIn('data-search=', index)
-        self.assertIn('data-worlds="vita vita-musl"', index)
+            with open(os.path.join(directory, "packages.html"), encoding="utf-8") as handle:
+                packages = handle.read()
+        self.assertIn('data-search=', packages)
+        self.assertIn('data-worlds="vita vita-musl"', packages)
 
     def test_a_target_selector_appears_only_with_more_than_one(self):
         with tempfile.TemporaryDirectory() as directory:
             generate.generate(TWO_WORLDS, directory)
-            with open(os.path.join(directory, "index.html"), encoding="utf-8") as handle:
+            with open(os.path.join(directory, "packages.html"), encoding="utf-8") as handle:
                 many = handle.read()
         with tempfile.TemporaryDirectory() as directory:
             generate.generate(STATUS, directory)
-            with open(os.path.join(directory, "index.html"), encoding="utf-8") as handle:
+            with open(os.path.join(directory, "packages.html"), encoding="utf-8") as handle:
                 one = handle.read()
         self.assertIn('id="world"', many)
         self.assertNotIn('id="world"', one)
@@ -328,9 +354,19 @@ class TestFiltering(unittest.TestCase):
     def test_the_description_is_searchable_too(self):
         with tempfile.TemporaryDirectory() as directory:
             generate.generate(STATUS, directory)
-            with open(os.path.join(directory, "index.html"), encoding="utf-8") as handle:
-                index = handle.read()
-        self.assertIn("lossless data-compression", index.lower())
+            with open(os.path.join(directory, "packages.html"), encoding="utf-8") as handle:
+                packages = handle.read()
+        self.assertIn("lossless data-compression", packages.lower())
+
+    def test_the_catalogue_gains_a_built_column(self):
+        status = dict(STATUS, packages=[
+            dict(STATUS["packages"][0],
+                 builds={"vita": {"status": "finished", "details": {}, "built_at": 200.0}})])
+        with tempfile.TemporaryDirectory() as directory:
+            generate.generate(status, directory)
+            with open(os.path.join(directory, "packages.html"), encoding="utf-8") as handle:
+                packages = handle.read()
+        self.assertIn("<th>Built</th>", packages)
 
 
 class TestSnapshots(unittest.TestCase):
@@ -343,7 +379,7 @@ class TestSnapshots(unittest.TestCase):
         return base
 
     def test_a_snapshot_links_to_its_release_and_names_its_core(self):
-        html = generate.render_snapshots(self.status(
+        html = generate.render_snapshots_section(self.status(
             published_tag="packages-snapshot-20260812.1.1",
             published_snapshots=[{"tag": "packages-snapshot-20260812.1.1",
                                   "published_at": "2026-08-12T18:47:27Z",
@@ -359,7 +395,7 @@ class TestSnapshots(unittest.TestCase):
         # The loop that badges a snapshot with the release serving it used to
         # bind over the snapshot it was iterating, so every column read after
         # it came from a series entry instead and the row rendered empty.
-        html = generate.render_snapshots(
+        html = generate.render_snapshots_section(
             self.status(
                 published_tag="packages-snapshot-20260812.1.1",
                 published_snapshots=[{"tag": "packages-snapshot-20260812.1.1",
@@ -374,80 +410,54 @@ class TestSnapshots(unittest.TestCase):
         self.assertNotIn("unknown", html)
 
     def test_nothing_published_says_so_instead_of_an_empty_table(self):
-        html = generate.render_snapshots(self.status(published_snapshots=[]))
+        html = generate.render_snapshots_section(self.status(published_snapshots=[]))
         self.assertIn("Nothing has been published yet", html)
         self.assertNotIn("<table>", html)
 
     def test_an_older_status_file_does_not_claim_nothing_is_published(self):
-        html = generate.render_snapshots(self.status())
+        html = generate.render_snapshots_section(self.status())
         self.assertNotIn("Nothing has been published", html)
         self.assertIn("before the site listed", html)
 
     def test_an_unreadable_date_does_not_hide_the_snapshot(self):
-        html = generate.render_snapshots(self.status(
+        html = generate.render_snapshots_section(self.status(
             published_snapshots=[{"tag": "packages-snapshot-1",
                                   "published_at": "whenever"}]))
         self.assertIn("packages-snapshot-1", html)
         self.assertIn("whenever", html)
 
-    def test_the_repository_column_names_the_release_serving_it(self):
-        # A tag is what reproduces a build; a release is what a person
-        # recognises. The versions come from that release's own database,
-        # not from a single "newest published" figure that would name one
-        # release and show another's versions.
+    def test_the_catalogue_names_the_channel_it_shows(self):
+        # A single column now, named after the channel selected in the header,
+        # not one column per release.
         status = self.status(published_tag="packages-snapshot-20260812.1.1",
                              packages=[{"name": "zlib", "version": "1.3.2-2",
                                         "builds": {"vita": {"status": "finished",
                                                             "details": {}}}}])
-        html = generate.render_index(
-            status,
-            series={"2026.09": {"packages": "snap-1", "status": "supported"}},
-            contents={"snap-1": {"zlib": {"version": "1.3.1-1", "description": ""}}})
+        series = {"2026.09": {"status": "supported", "summary": "", "core": "",
+                              "packages": "snap-1"}}
+        html = generate.render_packages(
+            status, "2026.09", series["2026.09"], [], series,
+            {"snap-1": {"zlib": {"version": "1.3.1-1", "description": ""}}}, depth=2)
         self.assertIn("In 2026.09", html)
         self.assertIn("1.3.1-1", html)
 
-    def test_a_release_that_has_ended_takes_no_column(self):
-        # With thirty releases this table would otherwise be thirty columns
-        # wide. History belongs on the snapshot pages.
-        columns = generate.release_columns(
-            {"old": {"packages": "snap-0", "status": "end-of-life"},
-             "new": {"packages": "snap-1", "status": "supported"}},
-            {"snap-0": {"zlib": {"version": "1.0", "description": ""}},
-             "snap-1": {"zlib": {"version": "2.0", "description": ""}}})
-        self.assertEqual([name for name, _ in columns], ["new"])
-
-    def test_releases_serving_the_same_snapshot_share_a_column(self):
-        # Right after cutting a release, every release serves the same
-        # snapshot, and two identical columns say nothing twice.
-        columns = generate.release_columns(
-            {"2026.09": {"packages": "snap-1", "status": "supported"},
-             "nightly": {"packages": "snap-1", "status": "development"}},
-            {"snap-1": {"zlib": {"version": "1.0", "description": ""}}})
-        self.assertEqual([name for name, _ in columns], ["2026.09, nightly"])
-
-    def test_the_number_of_columns_is_bounded(self):
-        series = {f"2026.{n:02d}": {"packages": f"snap-{n}", "status": "supported"}
-                  for n in range(30)}
-        contents = {f"snap-{n}": {"zlib": {"version": "1.0", "description": ""}}
-                    for n in range(30)}
-        columns = generate.release_columns(series, contents)
-        self.assertEqual(len(columns), generate.MAXIMUM_RELEASE_COLUMNS)
-
     def test_an_unattributed_snapshot_still_says_something_useful(self):
-        html = generate.render_index(self.status(
-            published_tag="packages-snapshot-20260812.1.1", packages=[]))
+        status = self.status(published_tag="packages-snapshot-20260812.1.1", packages=[])
+        html = generate.render_packages(status, None, None, [], {}, {}, depth=0)
         self.assertIn("In the last snapshot", html)
-        self.assertIn('href="snapshots.html"', html)
+        self.assertIn('href="#snapshots"', html)
 
     def test_without_a_snapshot_the_column_keeps_its_generic_name(self):
-        html = generate.render_index(self.status(packages=[]))
+        status = self.status(packages=[])
+        html = generate.render_packages(status, None, None, [], {}, {}, depth=0)
         self.assertIn("In repository", html)
 
-    def test_the_page_is_generated(self):
+    def test_the_snapshots_view_is_generated(self):
         with tempfile.TemporaryDirectory() as output:
             written = generate.generate(self.status(), output)
-        self.assertIn("snapshots.html", written)
-
+            self.assertIn("packages.html", written)
+            with open(os.path.join(output, "packages.html"), encoding="utf-8") as handle:
+                self.assertIn('data-view="snapshots"', handle.read())
 
 
 class TestDeprecation(unittest.TestCase):
@@ -461,7 +471,8 @@ class TestDeprecation(unittest.TestCase):
                               "builds": {"vita": {"status": "finished", "details": {}}}}]}
 
     def test_the_catalogue_marks_it(self):
-        html = generate.render_index(self.status("Python 2 is unsupported; use cpython3"))
+        html = generate.render_catalogue(self.status("Python 2 is unsupported; use cpython3"),
+                                         "In repository", None, [], None, 0, "packages.html")
         self.assertIn(">deprecated<", html)
         self.assertIn("use cpython3", html)
 
@@ -472,9 +483,9 @@ class TestDeprecation(unittest.TestCase):
         self.assertLess(html.index("Deprecated."), html.index("Published"))
 
     def test_a_normal_package_is_not_marked(self):
-        html = generate.render_index(self.status(""))
+        html = generate.render_catalogue(self.status(""), "In repository", None, [], None, 0,
+                                         "packages.html")
         self.assertNotIn("deprecated", html)
-
 
 
 class TestReleases(unittest.TestCase):
@@ -483,9 +494,11 @@ class TestReleases(unittest.TestCase):
     SERIES = {
         "2026.09": {"status": "supported", "summary": "First stable release",
                     "sequence": 4, "core": "sdk-snapshot-20260812.568.1",
+                    "core_repo": "vitasdk/autobuilds", "architectures": {},
                     "packages": "packages-snapshot-20260813.2.1", "deprecated": {}},
         "nightly": {"status": "development", "summary": "Rebuilt continuously",
                     "sequence": 41, "core": "sdk-snapshot-20260812.568.1",
+                    "core_repo": "vitasdk/autobuilds", "architectures": {},
                     "packages": "packages-snapshot-20260813.2.1", "deprecated": {}},
     }
 
@@ -498,36 +511,39 @@ class TestReleases(unittest.TestCase):
                 "snapshot_repo": "vitasdk/vitasdk-autobuild"}
 
     def test_a_release_is_named_with_what_it_serves(self):
-        html = generate.render_releases(self.status(), self.SERIES)
+        html = generate.render_releases_section(self.status(), self.SERIES)
         self.assertIn("2026.09", html)
         self.assertIn("Supported", html)
         self.assertIn("packages-snapshot-20260813.2.1", html)
         self.assertIn("VITASDK_CHANNEL=2026.09", html)
 
     def test_no_published_series_is_not_an_error(self):
-        html = generate.render_releases(self.status(), {})
+        html = generate.render_releases_section(self.status(), {})
         self.assertIn("No release series are published yet", html)
 
     def test_a_snapshot_a_release_serves_is_never_missing(self):
         # The status file can be older than the snapshot a release points at.
         status = self.status()
         status["published_snapshots"] = []
-        html = generate.render_snapshots(status, self.SERIES)
+        html = generate.render_snapshots_section(status, self.SERIES)
         self.assertIn("packages-snapshot-20260813.2.1", html)
         self.assertIn(">2026.09<", html)
 
     def test_a_snapshot_says_which_release_serves_it(self):
         # Being the newest and being the one people install are different
         # facts, and only the second matters to a reader.
-        html = generate.render_snapshots(self.status(), self.SERIES)
+        html = generate.render_snapshots_section(self.status(), self.SERIES)
         self.assertIn(">2026.09<", html)
 
-    def test_the_page_is_generated_and_linked(self):
+    def test_the_channel_pages_are_generated_and_linked(self):
         with tempfile.TemporaryDirectory() as output:
             written = generate.generate(self.status(), output, self.SERIES)
-            self.assertIn("releases.html", written)
+            self.assertIn(os.path.join("channel", "nightly", "packages.html"), written)
+            self.assertIn(os.path.join("channel", "2026.09", "packages.html"), written)
             with open(os.path.join(output, "index.html"), encoding="utf-8") as handle:
-                self.assertIn('href="releases.html"', handle.read())
+                index = handle.read()
+        # nightly is "development", so it is the default the site root shows.
+        self.assertIn('href="channel/nightly/downloads.html"', index)
 
     def test_a_release_gets_a_column_even_if_the_status_never_listed_it(self):
         # The status file is written per series, so the snapshot a release
@@ -543,17 +559,17 @@ class TestReleases(unittest.TestCase):
         try:
             with tempfile.TemporaryDirectory() as output:
                 generate.generate(status, output, self.SERIES)
-                with open(os.path.join(output, "index.html"), encoding="utf-8") as handle:
-                    index = handle.read()
+                with open(os.path.join(output, "channel", "2026.09", "packages.html"),
+                         encoding="utf-8") as handle:
+                    packages = handle.read()
                 snapshot_pages = os.listdir(os.path.join(output, "snapshot"))
         finally:
             generate.fetch_database = original
-        self.assertIn("In 2026.09", index)
+        self.assertIn("In 2026.09", packages)
         self.assertIn("packages-snapshot-20260813.2.1.html", snapshot_pages)
 
     def test_unreachable_channels_do_not_stop_the_build(self):
         self.assertEqual(generate.load_channels("https://127.0.0.1:9/channels"), {})
-
 
 
 class TestSnapshotBrowsing(unittest.TestCase):
@@ -623,6 +639,132 @@ class TestSnapshotBrowsing(unittest.TestCase):
     def test_an_unreadable_snapshot_costs_one_page_not_the_site(self):
         self.assertIsNone(generate.fetch_database("vitasdk/nope", "nope", "vita"))
 
+
+class TestHostHelpers(unittest.TestCase):
+    """Downloads reads real host triples and an opaque artifact list."""
+
+    def test_host_label_reads_the_triple(self):
+        self.assertEqual(generate.host_label("x86_64-linux-gnu"), "Linux x86_64")
+        self.assertEqual(generate.host_label("x86_64-linux-musl"), "Linux x86_64 (musl)")
+        self.assertEqual(generate.host_label("aarch64-linux-gnu"), "Linux aarch64")
+        self.assertEqual(generate.host_label("arm64-apple-darwin"), "macOS arm64")
+        self.assertEqual(generate.host_label("x86_64-w64-mingw32"), "Windows x86_64")
+        self.assertEqual(generate.host_label("x86_64-unknown-freebsd"), "FreeBSD x86_64")
+
+    def test_an_unrecognised_triple_falls_back_to_itself(self):
+        self.assertEqual(generate.host_label("riscv64-unknown-plan9"),
+                         "riscv64-unknown-plan9")
+
+    def test_classify_artifacts_finds_the_three_kinds(self):
+        found = generate.classify_artifacts([
+            "vitasdk-core-0.1-1-x86_64-linux-gnu.pkg.tar.xz",
+            "vdpm-0.1.0-1-x86_64-linux-gnu.pkg.tar.xz",
+            "x86_64-linux-gnu.db",
+            "x86_64-linux-gnu.files",
+            "vitasdk-bootstrap-x86_64-linux-gnu.tar.bz2",
+        ])
+        self.assertEqual(found["bootstrap"], "vitasdk-bootstrap-x86_64-linux-gnu.tar.bz2")
+        self.assertEqual(found["vdpm"], "vdpm-0.1.0-1-x86_64-linux-gnu.pkg.tar.xz")
+        self.assertEqual(found["sdk"], "vitasdk-core-0.1-1-x86_64-linux-gnu.pkg.tar.xz")
+
+    def test_classify_artifacts_skips_pacman_database_files(self):
+        found = generate.classify_artifacts(["x86_64-linux-gnu.db", "x86_64-linux-gnu.files"])
+        self.assertEqual(found, {})
+
+    def test_classify_artifacts_on_an_empty_list(self):
+        self.assertEqual(generate.classify_artifacts([]), {})
+
+
+class TestDownloads(unittest.TestCase):
+    """Every published host, with what to run and what to fetch directly."""
+
+    ITEM = {"core": "sdk-snapshot-1", "core_repo": "vitasdk/autobuilds",
+           "architectures": {"x86_64-linux-gnu": {}, "x86_64-w64-mingw32": {}}}
+
+    def test_no_channel_means_nothing_to_download(self):
+        html = generate.render_downloads(None, None, None, None)
+        self.assertIn("No release channel is published yet", html)
+
+    def test_a_host_absent_from_the_manifest_never_appears(self):
+        # There is no data source naming hosts nobody has built for yet;
+        # "coming soon" placeholders would have to be invented.
+        html = generate.render_downloads("nightly", self.ITEM, None, None)
+        self.assertIn("x86_64-linux-gnu", html)
+        self.assertIn("x86_64-w64-mingw32", html)
+        self.assertNotIn("coming soon", html)
+
+    def test_a_published_host_links_its_classified_artifacts(self):
+        manifest = {"hosts": [
+            {"name": "x86_64-linux-gnu", "build_id": "b", "artifacts": [
+                "vitasdk-bootstrap-x86_64-linux-gnu.tar.bz2",
+                "vitasdk-core-1-x86_64-linux-gnu.pkg.tar.xz",
+                "vdpm-1-x86_64-linux-gnu.pkg.tar.xz"]},
+        ]}
+        html = generate.render_downloads("nightly", self.ITEM, manifest, 1_700_000_000)
+        self.assertIn("vitasdk-bootstrap-x86_64-linux-gnu.tar.bz2", html)
+        self.assertIn("vdpm-1-x86_64-linux-gnu.pkg.tar.xz", html)
+        self.assertIn("Built ", html)
+
+    def test_an_old_snapshot_without_release_json_still_shows_the_host(self):
+        # release.json only exists on snapshots published from now on; an
+        # older one degrades to a bare link and no build date, not a crash.
+        html = generate.render_downloads("nightly", self.ITEM, None, None)
+        self.assertIn("published", html)
+        self.assertNotIn("Built ", html)
+        self.assertIn("releases/tag/sdk-snapshot-1", html)
+
+    def test_windows_gets_the_powershell_bootstrap(self):
+        html = generate.render_downloads("nightly", self.ITEM, None, None)
+        self.assertIn("bootstrap-vitasdk.ps1", html)
+        self.assertIn("bootstrap-vitasdk.sh", html)
+
+    def test_the_install_command_names_the_channel(self):
+        html = generate.render_downloads("2026.09", self.ITEM, None, None)
+        self.assertIn("VITASDK_CHANNEL=2026.09", html)
+
+
+class TestChrome(unittest.TestCase):
+    """The header a reader sees on every page: channel, tabs, context band."""
+
+    SERIES_ONE = {"nightly": {"status": "development"}}
+    SERIES_TWO = {"nightly": {"status": "development"}, "2026.09": {"status": "supported"}}
+
+    def test_a_single_channel_shows_no_picker(self):
+        html = generate.chrome("", self.SERIES_ONE, "nightly", "Downloads", "")
+        self.assertNotIn("channel-pill", html)
+
+    def test_more_than_one_channel_shows_a_picker(self):
+        html = generate.chrome("", self.SERIES_TWO, "nightly", "Downloads", "")
+        self.assertIn("channel-pill", html)
+        self.assertIn(">nightly<", html)
+        self.assertIn(">2026.09<", html)
+
+    def test_the_active_tab_is_marked(self):
+        html = generate.chrome("", self.SERIES_ONE, "nightly", "Packages", "")
+        self.assertIn('class="tab current" href="channel/nightly/packages.html"', html)
+
+    def test_world_selector_never_appears_with_one_world(self):
+        # Mirrors worlds_of: a second world (e.g. vita-softfp) would need a
+        # selector of its own, but nothing here invents one that has no data.
+        html = generate.chrome("", self.SERIES_ONE, "nightly", "Downloads", "")
+        self.assertNotIn('id="world"', html)
+
+    def test_core_band_names_the_snapshot_and_date(self):
+        band = generate.core_band("nightly", {"core": "sdk-snapshot-1"}, 1_700_000_000)
+        self.assertIn("nightly", band)
+        self.assertIn("sdk-snapshot-1", band)
+        self.assertIn("2023-11-14", band)
+
+    def test_core_band_without_a_date_says_unknown(self):
+        band = generate.core_band("nightly", {"core": "sdk-snapshot-1"}, None)
+        self.assertIn("an unknown time", band)
+
+    def test_packages_band_finds_the_publish_date(self):
+        band = generate.packages_band(
+            "nightly", {"packages": "snap-1"},
+            [{"tag": "snap-1", "published_at": "2026-08-12T18:47:27Z"}])
+        self.assertIn("snap-1", band)
+        self.assertIn("2026-08-12", band)
 
 
 if __name__ == "__main__":
