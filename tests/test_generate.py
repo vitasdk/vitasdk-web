@@ -1,5 +1,9 @@
+import io
+import tarfile
 import json
 import os
+import re
+import tarfile
 import tempfile
 import unittest
 from unittest import mock
@@ -139,6 +143,148 @@ class TestGenerate(unittest.TestCase):
             STATUS, "nightly", {"core": STATUS["worlds"][0]["core"]})
         self.assertNotIn("not the", page)
         self.assertIn("[vita-staging]", page)
+
+    def test_one_install_command_per_system_not_nine(self):
+        # Nine copies of one line was nine chances to copy somebody else's.
+        page = generate.render_downloads(
+            "2026.08",
+            {"core": "sdk-snapshot-1", "core_repo": "vitasdk/autobuilds",
+             "architectures": {"x86_64-linux-gnu": {}, "x86_64-w64-mingw32": {}}},
+            None, None)
+        # One radio and one panel per host, and the radio sits beside its
+        # panel so the CSS that swaps them needs no script and no host names.
+        self.assertEqual(page.count('class="pick"'), 2)
+        self.assertEqual(page.count('class="panel"'), 2)
+        self.assertIn('type="radio" name="host" id="host-x86-64-linux-gnu"', page)
+        self.assertIn('id="host-x86-64-linux-gnu" value="x86_64-linux-gnu" checked', page)
+        # Windows phrases it differently, and that is the only difference.
+        self.assertIn("bootstrap-vitasdk.ps1", page)
+        self.assertIn("bootstrap-vitasdk.sh", page)
+
+    def test_the_panel_is_hidden_until_its_radio_is_checked(self):
+        style = self.read("style.css")
+        self.assertIn(".panel { display: none;", style)
+        self.assertIn(".pick:checked + .panel { display: block; }", style)
+
+    def test_downloads_say_what_the_channel_ships(self):
+        page = generate.render_downloads(
+            "2026.08", {"core": "sdk-snapshot-1", "core_repo": "r",
+                        "architectures": {"x86_64-linux-gnu": {}}},
+            None, None, summary="What most homebrew is built against.",
+            lock={"sources": {"newlib": "64aa7aa33d4f380451a1f100d19589226cdad334",
+                              "gcc": "SHA256=438fd996826b0c82485a29da03a72d71d6e3541a",
+                              "vdpm": "v0.1.3"}},
+            gcc="15.2.0")
+        self.assertIn("15.2.0", page)
+        self.assertIn("64aa7aa33d4f", page)
+        self.assertIn("v0.1.3", page)
+        self.assertIn("What most homebrew is built against.", page)
+        # A source hash says nothing to a reader, so it is not shown as one.
+        self.assertNotIn("SHA256=", page)
+
+    def test_downloads_say_how_to_check_the_signature(self):
+        page = generate.render_downloads(
+            "2026.08", {"core": "c", "core_repo": "r",
+                        "architectures": {"x86_64-linux-gnu": {}}}, None, None)
+        self.assertIn("openssl pkeyutl -verify", page)
+        self.assertIn("channel-public-key.pem", page)
+        self.assertIn("2026.08.json.sig", page)
+        # Verified by hand against the served manifest and the shipped key.
+
+    def test_the_compiler_version_comes_off_the_file_list(self):
+        listing = "%FILES%\nusr/local/vitasdk/lib/gcc/arm-vita-eabi/15.2.0/cc1\n"
+        archive = io.BytesIO()
+        with tarfile.open(fileobj=archive, mode="w:gz") as tar:
+            info = tarfile.TarInfo("vitasdk-core-2026.08.1-1/files")
+            info.size = len(listing)
+            tar.addfile(info, io.BytesIO(listing.encode()))
+        with mock.patch.object(generate, "fetch_bytes", return_value=archive.getvalue()):
+            self.assertEqual(
+                generate.compiler_version("r", "t", "x86_64-linux-gnu"), "15.2.0")
+        with mock.patch.object(generate, "fetch_bytes", return_value=None):
+            self.assertEqual(generate.compiler_version("r", "t", "x86_64-linux-gnu"), "")
+
+    def catalogue(self, status_value, core):
+        return generate.render_catalogue(
+            STATUS, "In 2026.08", None, [], None, 0, "packages.html",
+            {"status": status_value, "core": core})
+
+    def test_a_supported_series_does_not_show_somebody_elses_queue(self):
+        # A package can sit in a release for a month and read "waiting for
+        # dependencies" because a rebuild of the next thing has not reached it.
+        page = self.catalogue("supported", "sdk-snapshot-20260825.611.1")
+        self.assertNotIn("<th>Status</th>", page)
+        self.assertNotIn("<th>Built</th>", page)
+        self.assertIn("sdk-snapshot-20260825.611.1", page)
+        self.assertNotIn(STATUS["worlds"][0]["core"], page)
+
+    def test_the_series_being_built_shows_its_queue(self):
+        page = self.catalogue("development", "whatever")
+        self.assertIn("<th>Status</th>", page)
+        self.assertIn("<th>Built</th>", page)
+        self.assertIn(STATUS["worlds"][0]["core"], page)
+
+    def test_the_recipe_column_says_it_is_the_recipe(self):
+        page = self.catalogue("supported", "c")
+        self.assertIn("<th>Recipe</th>", page)
+        self.assertNotIn("<th>Version</th>", page)
+        self.assertIn("what this release actually serves", page)
+
+    def test_the_columns_and_their_widths_stay_in_step(self):
+        # table-layout: fixed reads the colgroup, so one column more or less
+        # in the header silently shifts every width after it.
+        for status_value in ("supported", "development"):
+            page = self.catalogue(status_value, "c")
+            head = page[page.index("<thead>"):page.index("</thead>")]
+            self.assertEqual(page.count("<col "), head.count("<th>"),
+                             f"{status_value}: colgroup and header disagree")
+
+    def test_recently_built_is_news_to_one_channel_only(self):
+        # A package built two minutes ago, on the page of a release cut last
+        # month, reads as that release having just received it.
+        live = generate.render_updates_section(STATUS, True)
+        self.assertIn("What the autobuilder has produced most recently", live)
+        self.assertNotIn("except a patch of it", live)
+        supported = generate.render_updates_section(STATUS, False)
+        self.assertNotIn("<table>", supported)
+        self.assertIn("except a patch of it", supported)
+        # The link is a hash, which is what drives the sub-tabs, so it works
+        # with the script and jumps to the section without it.
+        self.assertIn('href="releases.html#snapshots"', supported)
+
+    def test_every_link_the_site_writes_points_at_a_file_it_wrote(self):
+        # Package pages live at the root and a channel page is two levels
+        # down, so every one of its 132 catalogue links 404'd in production.
+        # Built with channels, because that is where the depth comes from.
+        directory = tempfile.mkdtemp()
+        series = {"2026.08": {"status": "supported", "summary": "s", "sequence": 1,
+                              "core": "sdk-snapshot-1", "core_repo": "vitasdk/autobuilds",
+                              "architectures": {"x86_64-linux-gnu": {}},
+                              "packages": "packages-snapshot-1", "deprecated": {}},
+                  "nightly": {"status": "development", "summary": "n", "sequence": 2,
+                              "core": STATUS["worlds"][0]["core"],
+                              "core_repo": "vitasdk/autobuilds",
+                              "architectures": {"x86_64-linux-gnu": {}},
+                              "packages": "packages-snapshot-2", "deprecated": {}}}
+        with mock.patch.object(generate, "core_build_info", return_value=(None, None)), \
+                mock.patch.object(generate, "core_lock", return_value=None), \
+                mock.patch.object(generate, "compiler_version", return_value=""), \
+                mock.patch.object(generate, "fetch_database", return_value=None):
+            generate.generate(STATUS, directory, series)
+        self.assertTrue(os.path.isdir(os.path.join(directory, "channel", "2026.08")))
+        broken = []
+        for base, _, files in os.walk(directory):
+            for name in files:
+                if not name.endswith(".html"):
+                    continue
+                path = os.path.join(base, name)
+                with open(path, encoding="utf-8") as handle:
+                    body = handle.read()
+                for href in re.findall(r'href="([^"#:]+\.(?:html|css|json))(?:#[^"]*)?"', body):
+                    target = os.path.normpath(os.path.join(base, href))
+                    if not os.path.exists(target):
+                        broken.append((os.path.relpath(path, directory), href))
+        self.assertEqual(broken, [])
 
     def test_pages_are_regenerated_from_scratch(self):
         with open(os.path.join(self.directory, "stale.html"), "w", encoding="utf-8") as handle:
@@ -359,7 +505,7 @@ class TestRecentlyBuilt(unittest.TestCase):
                 page = handle.read()
         self.assertIn("libpng", page)
         self.assertIn("<th>Downloads</th>", page)
-        self.assertIn('data-view="updates"', page)
+        self.assertIn("Recently built", page)
 
 
 class TestFiltering(unittest.TestCase):
@@ -478,7 +624,7 @@ class TestSnapshots(unittest.TestCase):
         status = self.status(published_tag="packages-snapshot-20260812.1.1", packages=[])
         html = generate.render_packages(status, None, None, [], {}, {}, depth=0)
         self.assertIn("In the last snapshot", html)
-        self.assertIn('href="#snapshots"', html)
+        self.assertIn('href="releases.html#snapshots"', html)
 
     def test_without_a_snapshot_the_column_keeps_its_generic_name(self):
         status = self.status(packages=[])
@@ -490,7 +636,7 @@ class TestSnapshots(unittest.TestCase):
             written = generate.generate(self.status(), output)
             self.assertIn("packages.html", written)
             with open(os.path.join(output, "packages.html"), encoding="utf-8") as handle:
-                self.assertIn('data-view="snapshots"', handle.read())
+                self.assertIn("Recently built", handle.read())
 
 
 class TestDeprecation(unittest.TestCase):
