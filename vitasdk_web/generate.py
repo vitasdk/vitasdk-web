@@ -201,7 +201,10 @@ def classify_artifacts(names: list[str]) -> dict[str, str]:
     found: dict[str, str] = {}
     for name in names:
         lower = name.lower()
-        if lower.endswith((".db", ".files")):
+        # A checksum is not the thing it is the checksum of, and it sorts
+        # first often enough that six of nine cards linked to 65 bytes of
+        # text instead of the archive.
+        if lower.endswith((".db", ".files", ".sha256", ".sig")):
             continue
         if "bootstrap" in lower:
             found.setdefault("bootstrap", name)
@@ -966,7 +969,16 @@ client.</p>
 """
 
 
-def render_status(status: dict[str, Any]) -> str:
+def render_status(status: dict[str, Any], current: str | None = None,
+                  item: dict[str, Any] | None = None) -> str:
+    """What the autobuilder is doing, which is one world and one core.
+
+    A reader arrives here from a channel, and on any channel but the one the
+    autobuilder is currently building, none of this is about their release: a
+    series is rebuilt when it is patched and sits still the rest of the time.
+    Said plainly here rather than left to be read as theirs.
+    """
+
     packages = status["packages"]
     worlds = worlds_of(status)
 
@@ -1035,8 +1047,23 @@ in <code>$VITASDK/etc/pacman.conf</code>:</p>
 {blocks}
 """
 
+    # The staging repository holds partial results of the rebuild happening
+    # now, so it belongs to the world being built and to nobody else.
+    channel_core = (item or {}).get("core")
+    building = [world.get("core") for world in worlds if world.get("core")]
+    elsewhere = ""
+    if channel_core and building and channel_core not in building:
+        staging = ""
+        cores = " · ".join(f"<code>{esc(core)}</code>" for core in building)
+        elsewhere = (
+            f'<div class="band">This is the autobuilder, not the '
+            f'<strong>{esc(current or "")}</strong> channel: it is building {cores}. '
+            f'That series serves <code>{esc(channel_core)}</code>, which moves '
+            f'only when it is patched.</div>')
+
     return f"""
 <h1>Build status</h1>
+{elsewhere}
 <p class="lede">{" · ".join(f"{esc(w['arch'])} on <code>{esc(w['core'])}</code>" for w in worlds)},
 recipes at <code>{esc((status.get('packages_revision') or '')[:12])}</code>.</p>
 <table>{rows}</table>
@@ -1267,7 +1294,7 @@ def generate(status: dict[str, Any], output_dir: str,
         status_chrome = chrome("../" * depth, series, name, "Build status",
                                packages_band(name, item, snapshots))
         write(os.path.join(prefix, "status.html"),
-             page("Build status - VitaSDK", depth=depth, body=render_status(status),
+             page("Build status - VitaSDK", depth=depth, body=render_status(status, name, item),
                   chrome=status_chrome, generated_at=status.get("generated_at")))
 
     if series:

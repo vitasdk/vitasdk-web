@@ -107,6 +107,39 @@ class TestGenerate(unittest.TestCase):
         # The warning is the point: staging can hold partial rebuilds.
         self.assertIn("partial results", status)
 
+    def test_a_checksum_is_not_the_artifact_it_checksums(self):
+        # The sidecar sorts first often enough that six of nine download
+        # cards linked to 65 bytes of text instead of the archive.
+        artifacts = generate.classify_artifacts([
+            "vitasdk-bootstrap-x86_64-linux-gnu.tar.bz2.sha256",
+            "vitasdk-bootstrap-x86_64-linux-gnu.tar.bz2",
+            "vitasdk-core-2026.08.1-1-x86_64-linux-gnu.pkg.tar.xz",
+            "vdpm-0.1.3-1-x86_64-linux-gnu.pkg.tar.xz",
+            "x86_64-linux-gnu.db",
+        ])
+        self.assertEqual(artifacts["bootstrap"],
+                         "vitasdk-bootstrap-x86_64-linux-gnu.tar.bz2")
+        self.assertIn("core", artifacts["sdk"])
+        self.assertIn("vdpm", artifacts["vdpm"])
+
+    def test_the_build_status_says_whose_core_it_is_building(self):
+        # A series sits still until it is patched, so on any channel but the
+        # one being built, none of this is the reader's release.
+        page = generate.render_status(
+            STATUS, "2026.08", {"core": "sdk-snapshot-20260825.611.1"})
+        self.assertIn("not the", page)
+        self.assertIn("sdk-snapshot-20260825.611.1", page)
+        self.assertIn(STATUS["worlds"][0]["core"], page)
+        # Staging holds partial results of the rebuild happening now, which
+        # is not this series' rebuild.
+        self.assertNotIn("[vita-staging]", page)
+
+    def test_the_build_status_of_the_world_being_built_is_its_own(self):
+        page = generate.render_status(
+            STATUS, "nightly", {"core": STATUS["worlds"][0]["core"]})
+        self.assertNotIn("not the", page)
+        self.assertIn("[vita-staging]", page)
+
     def test_pages_are_regenerated_from_scratch(self):
         with open(os.path.join(self.directory, "stale.html"), "w", encoding="utf-8") as handle:
             handle.write("old")
