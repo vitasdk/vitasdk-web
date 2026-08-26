@@ -12,6 +12,7 @@ import html
 import io
 import json
 import os
+import re
 import shutil
 import sys
 import tarfile
@@ -164,6 +165,14 @@ def fetch_json(url: str) -> dict[str, Any] | None:
         return None
 
 
+def fetch_bytes(url: str) -> bytes | None:
+    try:
+        with urllib.request.urlopen(url, timeout=30) as response:  # noqa: S310
+            return response.read()
+    except (urllib.error.URLError, ValueError, TimeoutError):
+        return None
+
+
 def core_build_info(repo: str, tag: str) -> tuple[dict[str, Any] | None, float | None]:
     """A core snapshot's per-host artifact manifest, and when it was published.
 
@@ -189,6 +198,51 @@ def core_build_info(repo: str, tag: str) -> tuple[dict[str, Any] | None, float |
         except (TypeError, ValueError, OverflowError):
             built_at = None
     return manifest, built_at
+
+
+def core_lock(repo: str, tag: str) -> dict[str, Any] | None:
+    """The exact source of every component a core was built from.
+
+    Published inside the release since the protocol landed; a snapshot from
+    before that has none, and then the site says nothing rather than guessing.
+    """
+
+    if not repo or not tag:
+        return None
+    return fetch_json(f"https://github.com/{repo}/releases/download/{tag}/lock.json")
+
+
+GCC_IN_PATH = re.compile(r"lib/gcc/arm-vita-eabi/([0-9][0-9.]*)/")
+
+
+def compiler_version(repo: str, tag: str, host: str) -> str:
+    """Which gcc a core ships, read off the file list of the core package.
+
+    The lock pins gcc by source hash, so it cannot answer this; the package
+    database can, because the compiler's own version is a directory name in
+    the tree it installs. Costs one small file, and it is the first thing
+    anybody comparing releases wants to know.
+    """
+
+    if not repo or not tag or not host:
+        return ""
+    data = fetch_bytes(f"https://github.com/{repo}/releases/download/{tag}/{host}.files")
+    if not data:
+        return ""
+    try:
+        with tarfile.open(fileobj=io.BytesIO(data), mode="r:*") as archive:
+            for member in archive:
+                if not member.isfile() or os.path.basename(member.name) != "files":
+                    continue
+                handle = archive.extractfile(member)
+                if handle is None:
+                    continue
+                found = GCC_IN_PATH.search(handle.read().decode("utf-8", "replace"))
+                if found:
+                    return found.group(1)
+    except (tarfile.TarError, OSError):
+        return ""
+    return ""
 
 
 def classify_artifacts(names: list[str]) -> dict[str, str]:
@@ -329,9 +383,13 @@ def latest_build_time(builds: dict[str, Any]) -> float | None:
     return max(stamps) if stamps else None
 
 
-NAV_TABS = ("Downloads", "Packages", "Build status")
+NAV_TABS = ("Downloads", "Packages", "Releases", "Build status")
 TAB_FILES = {"Downloads": "downloads.html", "Packages": "packages.html",
-             "Build status": "status.html"}
+             "Releases": "releases.html", "Build status": "status.html"}
+# Releases and the snapshots under it are the same page whichever channel a
+# reader came from: one says which series exist, the other is the archive of
+# immutable states. Written once, at the root, and linked to from everywhere.
+GLOBAL_TABS = ("Releases",)
 
 
 def chrome(root: str, series: dict[str, Any], current: str | None, active: str,
@@ -344,7 +402,9 @@ def chrome(root: str, series: dict[str, Any], current: str | None, active: str,
     until a second one exists (see worlds_of).
     """
 
-    filename = TAB_FILES[active]
+    # A global tab has no per-channel copy, so a channel pill clicked from
+    # one lands on Downloads rather than on a page that does not exist.
+    filename = TAB_FILES["Downloads"] if active in GLOBAL_TABS else TAB_FILES[active]
     pills = ""
     if len(series) > 1:
         items = "".join(
@@ -354,7 +414,7 @@ def chrome(root: str, series: dict[str, Any], current: str | None, active: str,
         pills = f'<div class="channels">{items}</div>'
 
     def tab_href(tab: str) -> str:
-        if current:
+        if current and tab not in GLOBAL_TABS:
             return f"{root}channel/{esc(current)}/{TAB_FILES[tab]}"
         return f"{root}{TAB_FILES[tab]}"
 
@@ -431,9 +491,52 @@ def page(title: str, *, body: str, chrome: str, depth: int = 0,
 """
 
 
+def component_rows(lock: dict[str, Any] | None, gcc: str) -> str:
+    """What a channel actually ships, named rather than hashed.
+
+    The lock pins the autotools components by source hash, which says nothing
+    to a reader, so those are left out; the ones pinned by revision are shown
+    as the revision, because that is a thing you can go and look at.
+    """
+
+    repositories = {
+        "newlib": "https://github.com/vitasdk/newlib/commit/",
+        "headers": "https://github.com/vitasdk/vita-headers/commit/",
+        "pthread": "https://github.com/vitasdk/pthread-embedded/commit/",
+        "toolchain": "https://github.com/vitasdk/vita-toolchain/commit/",
+        "samples": "https://github.com/vitasdk/samples/commit/",
+    }
+    labels = {"newlib": "newlib", "headers": "vita-headers",
+              "pthread": "pthread-embedded", "toolchain": "vita-toolchain",
+              "samples": "samples", "vdpm": "vdpm"}
+
+    rows = ""
+    if gcc:
+        rows += f'<tr><td>gcc</td><td class="version">{esc(gcc)}</td></tr>'
+    sources = (lock or {}).get("sources") or {}
+    for key, label in labels.items():
+        value = sources.get(key)
+        if not value or value.startswith("SHA256="):
+            continue
+        shown = value[:12] if len(value) == 40 else value
+        base = repositories.get(key)
+        cell = (f'<a href="{esc(base + value)}"><code>{esc(shown)}</code></a>'
+                if base else f"<code>{esc(shown)}</code>")
+        rows += f'<tr><td>{esc(label)}</td><td class="version">{cell}</td></tr>'
+    return rows
+
+
 def render_downloads(name: str | None, item: dict[str, Any] | None,
-                     manifest: dict[str, Any] | None, built_at: float | None) -> str:
+                     manifest: dict[str, Any] | None, built_at: float | None,
+                     summary: str = "", lock: dict[str, Any] | None = None,
+                     gcc: str = "") -> str:
     """Every host a channel's core is published for, and how to install it.
+
+    One panel, not one command per host: every host runs the same installer
+    and only Windows phrases it differently, so nine copies of one line was
+    nine chances to copy somebody else's. Picking a system swaps the panel,
+    through a radio and CSS rather than through script, so it still works
+    with none. Script only preselects the reader's own.
 
     A host missing from the manifest's architecture list is not yet built for
     this channel; there is no data source that also names hosts nobody has
@@ -455,37 +558,82 @@ lists the systems it builds for and how to install each.</p>
               if isinstance(entry, dict) and entry.get("name")}
     built = absolute(built_at) if built_at else ""
 
-    cards = []
-    for host in sorted(architectures):
+    hosts = sorted(architectures)
+    # Linux x86_64 is the panel somebody without script lands on.
+    default = "x86_64-linux-gnu" if "x86_64-linux-gnu" in hosts else hosts[0]
+
+    cards, panels = "", ""
+    for host in hosts:
         windows = "mingw" in host
+        identifier = "host-" + re.sub(r"[^a-z0-9]+", "-", host)
+        checked = " checked" if host == default else ""
+        radio = (f'<input class="pick" type="radio" name="host" '
+                 f'id="{esc(identifier)}" value="{esc(host)}"{checked}>')
+        cards += (f'<label class="host" for="{esc(identifier)}" data-host="{esc(host)}">'
+                  f'<span class="name">{esc(host_label(host))}</span>'
+                  f'<span class="desc">{esc(host)}</span></label>')
+
         artifacts = classify_artifacts(by_host.get(host, []))
         if artifacts:
             base = f"https://github.com/{repo}/releases/download/{tag}/"
             links = " ".join(
                 f'<a href="{esc(base + artifacts[key])}">{label}</a>'
-                for key, label in (("bootstrap", "bootstrap"), ("sdk", "sdk"),
-                                   ("vdpm", "vdpm"))
+                for key, label in (("bootstrap", "bootstrap archive"),
+                                   ("sdk", "core package"), ("vdpm", "vdpm package"))
                 if key in artifacts)
         elif repo and tag:
             links = (f'<a href="https://github.com/{esc(repo)}/releases/tag/{esc(tag)}">'
                      f'release page</a>')
         else:
             links = ""
-        built_html = f'<p class="built">Built {esc(built)}</p>' if built else ""
-        cards.append(f"""<div class="host" data-host="{esc(host)}">
-  <h3>{esc(host_label(host))}</h3>
-  <p class="desc">{esc(host)}</p>
-  <p><span class="badge ok">published</span></p>
-  {built_html}
+        built_html = f'<span class="built">Built {esc(built)}</span>' if built else ""
+        panels += radio + f"""<div class="panel" data-for="{esc(host)}">
+  <h2>{esc(host_label(host))} <span class="desc">{esc(host)}</span></h2>
+  <p class="meta"><span class="badge ok">published</span> {built_html}</p>
   <pre><code>{bootstrap_snippet(name, windows)}</code></pre>
   <p class="links">{links}</p>
-</div>""")
+</div>"""
+
+    rows = component_rows(lock, gcc)
+    inside = f"""
+<h2>What this channel ships</h2>
+<table class="inside">{rows}</table>
+""" if rows else ""
+
+    channel = esc(name or "")
+    summary_html = f'<p class="lede">{esc(summary)}</p>' if summary else ""
 
     return f"""
 <h1>Downloads</h1>
-<p class="lede">Pick a system below. Every card runs the same installer; only
-the channel differs.</p>
-<div class="hosts">{"".join(cards)}</div>
+{summary_html}
+<p class="lede">Pick your system. Every one of them installs the same way; the
+command below changes with it.</p>
+<div class="picker">
+  <div class="hosts">{cards}</div>
+  <div class="panels">{panels}</div>
+</div>
+{inside}
+<h2>Then what</h2>
+<ol class="steps">
+  <li>Install a package: <code>vdpm install libpng</code>. <a href="packages.html">What
+      there is</a>.</li>
+  <li>Build the sample it ships with:
+<pre><code>cmake -S "$VITASDK/share/gcc-arm-vita-eabi/samples/hello_world" \\
+  -B /tmp/hello -DCMAKE_TOOLCHAIN_FILE="$VITASDK/share/vita.toolchain.cmake"
+cmake --build /tmp/hello</code></pre></li>
+  <li>Keep it current with <code>vdpm upgrade</code>. A series only moves when it
+      is patched; nightly moves under you.</li>
+</ol>
+<h2>Checking what you got</h2>
+<p>The channel this page describes is served as a signed document, and the key
+that signs it ships inside the SDK. Nothing downstream is trusted for it:</p>
+<pre><code>curl -fsSLO https://vitasdk.org/channels/{channel}.json
+curl -fsSLO https://vitasdk.org/channels/{channel}.json.sig
+openssl pkeyutl -verify -rawin -pubin \\
+  -inkey "$VITASDK/share/vdpm/channel-public-key.pem" \\
+  -sigfile {channel}.json.sig -in {channel}.json</code></pre>
+<p class="desc">Every package and every archive it names carries its own
+checksum, and the client checks those on install.</p>
 <script>
 (function () {{
   var ua = navigator.userAgent;
@@ -495,9 +643,27 @@ the channel differs.</p>
   else if (/FreeBSD/.test(ua)) suffix = 'freebsd';
   else if (/Linux/.test(ua)) suffix = /musl/i.test(ua) ? 'linux-musl' : 'linux-gnu';
   if (!suffix) return;
-  var cards = document.querySelectorAll('.host[data-host]');
-  for (var i = 0; i < cards.length; i++) {{
-    if (cards[i].dataset.host.endsWith(suffix)) {{ cards[i].classList.add('mine'); break; }}
+  var arm = /arm64|aarch64|Apple M/i.test(ua) || (/Mac/.test(ua) && navigator.maxTouchPoints > 1);
+  var picks = document.querySelectorAll('.pick');
+  var chosen = null;
+  for (var i = 0; i < picks.length; i++) {{
+    if (picks[i].value.indexOf(suffix) < 0) continue;
+    var isArm = /^(arm64|aarch64)/.test(picks[i].value);
+    if (!chosen || isArm === arm) chosen = picks[i];
+  }}
+  if (chosen) chosen.checked = true;
+  var current = document.querySelector('.pick:checked');
+  if (!current) return;
+  var label = document.querySelector('.host[data-host="' + current.value + '"]');
+  if (label) label.classList.add('current');
+  var picks2 = document.querySelectorAll('.pick');
+  for (var j = 0; j < picks2.length; j++) {{
+    picks2[j].addEventListener('change', function (event) {{
+      var previous = document.querySelector('.host.current');
+      if (previous) previous.classList.remove('current');
+      var next = document.querySelector('.host[data-host="' + event.target.value + '"]');
+      if (next) next.classList.add('current');
+    }});
   }}
 }})();
 </script>
@@ -533,9 +699,27 @@ def view_selector(current: str, snapshots: list[dict[str, Any]], depth: int = 0,
 
 def render_catalogue(status: dict[str, Any], label: str, column: dict[str, str] | None,
                      available: list[dict[str, Any]], series: dict[str, Any] | None,
-                     depth: int, home: str) -> str:
+                     depth: int, home: str, item: dict[str, Any] | None = None) -> str:
+    """What a channel serves, and -- where it is the same thing -- what is being built.
+
+    The queue belongs to the world the autobuilder is rebuilding now. On any
+    other channel those columns describe somebody else's work: a package can
+    sit in a release for a month and read "waiting for dependencies" here
+    because a rebuild of the next thing has not reached it. Shown only where
+    it is the reader's own.
+    """
+
     packages = status["packages"]
     worlds = worlds_of(status)
+    # A development series is the one the autobuilder feeds: it moves as fast
+    # as the queue does, so the queue is its own news. A supported series is
+    # rebuilt only when it is patched, and reading a package of it as
+    # "waiting for dependencies" would be reading somebody else's queue.
+    live = (item or {}).get("status", "development") == "development"
+    # Package pages are written once, at the root; a channel page is two
+    # directories down, and every one of its links pointed at a file beside
+    # itself. All 132 of them, on both channels, 404 in production.
+    package_root = "../" * depth + "package/"
     snapshot_selector = view_selector("building", available, depth=depth, series=series,
                                       home=home)
 
@@ -550,8 +734,12 @@ def render_catalogue(status: dict[str, Any], label: str, column: dict[str, str] 
         world_label = f'<span class="world">{esc(world["arch"])}</span> ' if len(worlds) > 1 else ""
         summaries.append(f"<p class=\"summary\">{world_label}{line}</p>")
 
-    headers = "".join(f"<th>{esc(w['arch'])}</th>" for w in worlds) if len(worlds) > 1 \
-        else "<th>Status</th>"
+    if not live:
+        headers = ""
+    elif len(worlds) > 1:
+        headers = "".join(f"<th>{esc(w['arch'])}</th>" for w in worlds)
+    else:
+        headers = "<th>Status</th>"
 
     rows = []
     for package in packages:
@@ -561,16 +749,19 @@ def render_catalogue(status: dict[str, Any], label: str, column: dict[str, str] 
             published = f'<td class="version">{esc(package.get("repo_version") or "—")}</td>'
         builds = builds_of(package, worlds)
         cells = ""
-        for world in worlds:
-            build = builds.get(world["arch"])
-            cells += f"<td>{status_badge(build['status']) if build else '<span class=\"absent\">&mdash;</span>'}</td>"
+        if live:
+            for world in worlds:
+                build = builds.get(world["arch"])
+                cells += f"<td>{status_badge(build['status']) if build else '<span class=\"absent\">&mdash;</span>'}</td>"
         built = latest_build_time(builds)
-        built_cell = f'<td class="k">{esc(ago(built))}</td>' if built else \
-            '<td class="absent">&mdash;</td>'
+        built_cell = ""
+        if live:
+            built_cell = f'<td class="k">{esc(ago(built))}</td>' if built else \
+                '<td class="absent">&mdash;</td>'
         # Marked where people go looking for something to use, which is the
         # only place a deprecation changes anybody's mind.
         deprecated = package.get("deprecated", "")
-        name_cell = f'<a href="package/{esc(package["name"])}.html">{esc(package["name"])}</a>'
+        name_cell = f'<a href="{package_root}{esc(package["name"])}.html">{esc(package["name"])}</a>'
         if deprecated:
             name_cell += (f' <span class="badge stale" title="{esc(deprecated)}">'
                           f'deprecated</span>')
@@ -589,7 +780,8 @@ def render_catalogue(status: dict[str, Any], label: str, column: dict[str, str] 
     if column is not None:
         in_repository = f"<th>{esc(label)}</th>"
     elif label:
-        in_repository = f'<th><a href="#snapshots">{esc(label)}</a></th>'
+        releases = "../" * depth + "releases.html"
+        in_repository = f'<th><a href="{releases}#snapshots">{esc(label)}</a></th>'
     else:
         in_repository = "<th>Published</th>"
 
@@ -605,10 +797,27 @@ def render_catalogue(status: dict[str, Any], label: str, column: dict[str, str] 
     else:
         world_filter = ""
 
+    # A channel serves the core it was promoted with; what the autobuilder is
+    # building now is a different question, and answering it here told a
+    # reader of a series that their packages were built against a core their
+    # release has never heard of.
+    against = built_against if live else f'<code>{esc((item or {}).get("core", ""))}</code>'
+    built_header = "<th>Built</th>" if live else ""
+    queue_columns = (len(worlds) if len(worlds) > 1 else 1) + 1 if live else 0
+    columns = ('<col class="c-name"><col class="c-version">'
+               '<col class="c-version">'
+               + '<col class="c-queue">' * queue_columns
+               + '<col class="c-desc">')
+    difference = ("<p class=\"lede\">A package's <strong>recipe</strong> version is what "
+                  "the autobuilder intends to build; the next column is what this "
+                  "release actually serves. They differ while a rebuild is in "
+                  "flight.</p>")
+
     return f"""
 <h2>Catalogue</h2>
-<p class="lede">{len(packages)} packages built against {built_against}
+<p class="lede">{len(packages)} packages built against {against}
 from <a href="https://github.com/{esc(status.get("packages_repo", ""))}">{esc(status.get("packages_repo", ""))}</a>.</p>
+{difference}
 {"".join(summaries)}
 <div class="controls">
   <input id="filter" type="search" placeholder="Filter by name or description" autocomplete="off">
@@ -616,8 +825,9 @@ from <a href="https://github.com/{esc(status.get("packages_repo", ""))}">{esc(st
   {snapshot_selector}
   <span id="count" class="count"></span>
 </div>
-<table id="packages">
-<thead><tr><th>Package</th><th>Version</th>{in_repository}{headers}<th>Built</th><th>Description</th></tr></thead>
+<table id="packages" class="catalogue">
+<colgroup>{columns}</colgroup>
+<thead><tr><th>Package</th><th>Recipe</th>{in_repository}{headers}{built_header}<th>Description</th></tr></thead>
 <tbody>
 {chr(10).join(rows)}
 </tbody>
@@ -693,8 +903,7 @@ def render_package(package: dict[str, Any], status: dict[str, Any],
     binaries = ", ".join(esc(name) for name in package.get("binaries", []))
     licenses = ", ".join(esc(name) for name in package.get("licenses", [])) or "&mdash;"
 
-    packages_href = (f'../channel/{esc(default_channel)}/packages.html' if default_channel
-                     else '../packages.html')
+    releases_href = "../releases.html"
 
     # Above everything else, because it changes whether the rest is worth
     # reading. It says do not start something new on this, not that it is
@@ -706,9 +915,9 @@ def render_package(package: dict[str, Any], status: dict[str, Any],
         tag = status["published_tag"]
         name = next((n for n, item in sorted((series or {}).items())
                      if item.get("packages") == tag), "")
-        published_in = (f' &middot; <a href="{packages_href}#releases" title="{esc(tag)}">'
+        published_in = (f' &middot; <a href="{releases_href}#releases" title="{esc(tag)}">'
                         f'{esc(name)}</a>' if name else
-                        f' &middot; <a href="{packages_href}#snapshots">{esc(tag)}</a>')
+                        f' &middot; <a href="{releases_href}#snapshots">{esc(tag)}</a>')
 
     notice = ""
     if package.get("deprecated"):
@@ -758,13 +967,33 @@ def recently_built(status: dict[str, Any], limit: int = 60) -> list[dict[str, An
     return entries[:limit]
 
 
-def render_updates_section(status: dict[str, Any]) -> str:
+def render_updates_section(status: dict[str, Any], live: bool = True,
+                           depth: int = 0) -> str:
+    """What the autobuilder produced last, which is news to one channel only.
+
+    On a supported series it is somebody else's: those builds are going into
+    the series being developed, not into this one, and a reader who sees a
+    package built two minutes ago on the page of a release cut last month
+    reads it as theirs.
+    """
+
+    if not live:
+        releases = "../" * depth + "releases.html"
+        return f"""
+<h2>Recently built</h2>
+<p class="lede">Nothing is built into a supported series except a patch of it.
+The packages this one serves were built when it was cut, and they stay as they
+are until it is patched: what moves continuously is the development series.
+<a href="{releases}#snapshots">Its snapshots</a> record each state.</p>
+"""
+
+    package_root = "../" * depth + "package/"
     entries = recently_built(status)
     if not entries:
         body = "<p>Nothing has been built yet.</p>"
     else:
         rows = "".join(
-            f'<tr><td><a href="package/{esc(e["package"]["name"])}.html">'
+            f'<tr><td><a href="{package_root}{esc(e["package"]["name"])}.html">'
             f'{esc(e["package"]["name"])}</a></td>'
             f'<td class="version">{esc(e["package"]["version"])}</td>'
             f'<td class="k">{esc(e["world"])}</td>'
@@ -970,7 +1199,7 @@ client.</p>
 
 
 def render_status(status: dict[str, Any], current: str | None = None,
-                  item: dict[str, Any] | None = None) -> str:
+                  item: dict[str, Any] | None = None, depth: int = 0) -> str:
     """What the autobuilder is doing, which is one world and one core.
 
     A reader arrives here from a channel, and on any channel but the one the
@@ -979,6 +1208,7 @@ def render_status(status: dict[str, Any], current: str | None = None,
     Said plainly here rather than left to be read as theirs.
     """
 
+    package_root = "../" * depth + "package/"
     packages = status["packages"]
     worlds = worlds_of(status)
 
@@ -1013,7 +1243,7 @@ def render_status(status: dict[str, Any], current: str | None = None,
                 f'<a href="{esc(url)}">{esc(label)}</a>'
                 for label, url in (details.get("urls") or {}).items()) or "&mdash;"
             failed_rows += (
-                f'<tr><td><a href="package/{esc(package["name"])}.html">{esc(package["name"])}</a></td>'
+                f'<tr><td><a href="{package_root}{esc(package["name"])}.html">{esc(package["name"])}</a></td>'
                 f'<td class="k">{esc(world["arch"])}</td>'
                 f'<td class="version">{esc(package["version"])}</td>'
                 f'<td>{logs}</td>'
@@ -1079,7 +1309,14 @@ recipes at <code>{esc((status.get('packages_revision') or '')[:12])}</code>.</p>
 def render_packages(status: dict[str, Any], name: str | None, item: dict[str, Any] | None,
                     available: list[dict[str, Any]], series: dict[str, Any] | None,
                     contents_by_tag: dict[str, dict[str, dict[str, str]]], depth: int) -> str:
-    """The four existing views, now sub-tabs of one page instead of four files."""
+    """What this channel serves, and what is being built into it.
+
+    Releases and snapshots used to be sub-tabs here and are neither about
+    packages nor about the channel a reader picked: identical on every
+    channel page, and the first of them is where you go to pick one. They
+    have a page of their own now, and with them gone there is one view left,
+    so the tabs went too.
+    """
 
     tag = (item or {}).get("packages", "")
     contents = contents_by_tag.get(tag) if tag else None
@@ -1094,37 +1331,32 @@ def render_packages(status: dict[str, Any], name: str | None, item: dict[str, An
         label = "In repository"
 
     home = f"channel/{name}/packages.html" if name else "packages.html"
-    catalogue = render_catalogue(status, label, column, available, series, depth, home)
-    updates = render_updates_section(status)
-    releases = render_releases_section(status, series)
-    snapshots = render_snapshots_section(status, series)
+    catalogue = render_catalogue(status, label, column, available, series, depth,
+                                 home, item)
+    updates = render_updates_section(
+        status, (item or {}).get("status", "development") == "development", depth)
 
     return f"""
 <h1>Packages</h1>
-<div class="subtabs">
-  <button class="subtab" data-view="catalogue">Catalogue</button>
-  <button class="subtab" data-view="updates">Recently built</button>
-  <button class="subtab" data-view="releases">Releases</button>
-  <button class="subtab" data-view="snapshots">Snapshots</button>
-</div>
-<section class="subview" data-view="catalogue">{catalogue}</section>
-<section class="subview" data-view="updates">{updates}</section>
-<section class="subview" data-view="releases">{releases}</section>
-<section class="subview" data-view="snapshots">{snapshots}</section>
-<script>
-const subtabs = document.querySelectorAll('.subtab');
-const views = document.querySelectorAll('.subview');
-function show(name) {{
-  for (const view of views) view.hidden = view.dataset.view !== name;
-  for (const tab of subtabs) tab.classList.toggle('current', tab.dataset.view === name);
-}}
-for (const tab of subtabs) {{
-  tab.addEventListener('click', () => {{ location.hash = tab.dataset.view; }});
-}}
-window.addEventListener('hashchange', () => show((location.hash || '#catalogue').slice(1)));
-show((location.hash || '#catalogue').slice(1));
-</script>
+{catalogue}
+{updates}
 """
+
+
+def render_releases(status: dict[str, Any], series: dict[str, Any] | None) -> str:
+    """Which series exist, and every immutable state each of them has had.
+
+    Written once rather than per channel: this is where a reader decides
+    which channel they are on, so it cannot be something you reach only by
+    already being on one.
+    """
+
+    return f"""
+<h1>Releases</h1>
+{render_releases_section(status, series)}
+{render_snapshots_section(status, series)}
+"""
+
 
 
 STYLE = """\
@@ -1177,6 +1409,14 @@ select { padding: .55rem .7rem; border: 1px solid var(--line); border-radius: 6p
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 table { width: 100%; border-collapse: collapse; margin-bottom: 1rem; display: block;
         overflow-x: auto; }
+/* Fixed so a column keeps its width between pages and between channels,
+   where content-sized columns moved every time a name got longer. */
+table.catalogue { table-layout: fixed; min-width: 46rem; }
+.c-name { width: 14rem; }
+.c-version { width: 7.5rem; }
+.c-queue { width: 9rem; }
+.c-desc { width: auto; }
+table.catalogue td { overflow-wrap: anywhere; }
 th, td { text-align: left; padding: .45rem .6rem; border-bottom: 1px solid var(--line);
          vertical-align: top; }
 th { color: var(--muted); font-weight: 600; font-size: 13px; }
@@ -1203,14 +1443,28 @@ th { color: var(--muted); font-weight: 600; font-size: 13px; }
           color: var(--muted); background: var(--bg); font: inherit; cursor: pointer; }
 .subtab.current { border-color: var(--accent); color: var(--accent); font-weight: 600; }
 .subview[hidden] { display: none; }
-.hosts { display: grid; grid-template-columns: repeat(auto-fill, minmax(15rem, 1fr));
-         gap: .9rem; margin-top: 1rem; }
-.host { border: 1px solid var(--line); border-radius: 8px; padding: .9rem 1.1rem; }
-.host.mine { grid-column: 1 / -1; border-color: var(--accent); order: -1;
-             background: color-mix(in srgb, var(--accent) 6%, var(--bg)); }
-.host h3 { margin: 0 0 .1rem; font-size: 1rem; }
-.host .built { color: var(--muted); font-size: 12px; margin: .4rem 0; }
-.host .links { display: flex; gap: .9rem; font-size: 13px; margin-top: .6rem; }
+.picker .pick { position: absolute; opacity: 0; pointer-events: none; }
+.hosts { display: grid; grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr));
+    gap: .6rem; margin-bottom: 1.2rem; }
+.host { display: block; border: 1px solid var(--line); border-radius: 8px;
+    padding: .6rem .8rem; cursor: pointer; }
+.host:hover { border-color: var(--accent); }
+.host .name { display: block; font-weight: 600; }
+.host .desc { display: block; font-size: 12px; }
+.panel { display: none; border: 1px solid var(--accent); border-radius: 8px;
+    padding: 1rem 1.2rem; margin-bottom: 1.4rem; }
+.panel h2 { margin: 0 0 .3rem; font-size: 1.15rem; }
+.panel h2 .desc { font-weight: 400; font-size: .85rem; }
+.panel .meta { margin: 0 0 .8rem; font-size: 13px; }
+.panel .built { color: var(--muted); }
+.panel .links { display: flex; flex-wrap: wrap; gap: .9rem; font-size: 13px;
+    margin: .6rem 0 0; }
+.pick:checked + .panel { display: block; }
+.host.current { border-color: var(--accent); background: var(--chip); }
+table.inside { width: auto; margin-bottom: 1.4rem; }
+table.inside td { padding: .2rem 1.4rem .2rem 0; }
+ol.steps { line-height: 1.7; padding-left: 1.2rem; }
+ol.steps pre { margin: .5rem 0; }
 """
 
 
@@ -1273,13 +1527,25 @@ def generate(status: dict[str, Any], output_dir: str,
     # Fetched once per channel so every page that shows it shares the result.
     core_info = {name: core_build_info(item.get("core_repo", ""), item.get("core", ""))
                 for name, item in series.items()}
+    # What a channel ships, fetched once per channel: the lock names every
+    # source, and the core package's file list is the only published thing
+    # that names the compiler's version.
+    core_detail = {}
+    for name, item in series.items():
+        repo, tag = item.get("core_repo", ""), item.get("core", "")
+        hosts = sorted((item.get("architectures") or {}))
+        host = "x86_64-linux-gnu" if "x86_64-linux-gnu" in hosts else (hosts[0] if hosts else "")
+        core_detail[name] = (core_lock(repo, tag), compiler_version(repo, tag, host))
 
     def emit(prefix: str, depth: int, name: str | None, item: dict[str, Any] | None) -> None:
         manifest, built_at = core_info.get(name, (None, None))
+        lock, gcc = core_detail.get(name, (None, ""))
         downloads_chrome = chrome("../" * depth, series, name, "Downloads",
                                   core_band(name, item, built_at))
         write(os.path.join(prefix, "downloads.html"),
-             page("Downloads - VitaSDK", body=render_downloads(name, item, manifest, built_at),
+             page("Downloads - VitaSDK",
+                  body=render_downloads(name, item, manifest, built_at,
+                                        (item or {}).get("summary", ""), lock, gcc),
                   chrome=downloads_chrome, depth=depth,
                   generated_at=status.get("generated_at")))
 
@@ -1294,8 +1560,16 @@ def generate(status: dict[str, Any], output_dir: str,
         status_chrome = chrome("../" * depth, series, name, "Build status",
                                packages_band(name, item, snapshots))
         write(os.path.join(prefix, "status.html"),
-             page("Build status - VitaSDK", depth=depth, body=render_status(status, name, item),
+             page("Build status - VitaSDK", depth=depth, body=render_status(status, name, item, depth),
                   chrome=status_chrome, generated_at=status.get("generated_at")))
+
+    write("releases.html",
+          page("Releases - VitaSDK",
+               body=render_releases(status, series),
+               chrome=chrome("", series, None, "Releases",
+                             '<div class="band">Every series, and every immutable '
+                             'state each of them has had.</div>'),
+               depth=0, generated_at=status.get("generated_at")))
 
     if series:
         for name, item in series.items():
