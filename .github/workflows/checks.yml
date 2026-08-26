@@ -1,0 +1,57 @@
+name: checks
+
+# deploy.yml runs the tests too, but only once a change is on main: it is the
+# gate on publishing, not on merging. This is the one that answers before
+# anybody presses the button.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions: {}
+
+concurrency:
+  group: checks-${{ github.event.pull_request.head.sha || github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Run the tests
+        run: python3 -m unittest discover -t . -s tests
+
+      # The site is generated from a status file it fetches, so a change that
+      # only breaks against real data would pass the tests and break the
+      # deploy. This builds the real thing, from the real status.
+      - name: Generate the site the way the deploy does
+        run: python3 -m vitasdk_web.generate --status vitasdk/vitasdk-autobuild --output _site
+
+      - name: Every link points at a file that was written
+        shell: python
+        run: |
+          import os, re, sys
+
+          broken = []
+          for base, _, files in os.walk("_site"):
+              for name in files:
+                  if not name.endswith(".html"):
+                      continue
+                  path = os.path.join(base, name)
+                  with open(path, encoding="utf-8") as handle:
+                      body = handle.read()
+                  for href in re.findall(r'href="([^"#:]+\.(?:html|css|json))(?:#[^"]*)?"', body):
+                      if not os.path.exists(os.path.normpath(os.path.join(base, href))):
+                          broken.append(f"{os.path.relpath(path, '_site')} -> {href}")
+          if broken:
+              print("\n".join(sorted(set(broken))[:40]))
+              sys.exit(f"{len(broken)} broken links")
+          print("no broken links")
