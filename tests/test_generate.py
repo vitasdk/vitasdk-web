@@ -389,6 +389,20 @@ class TestTwoWorlds(unittest.TestCase):
         self.assertIn("<th>vita</th>", packages)
         self.assertIn("<th>vita-musl</th>", packages)
 
+    def test_the_index_says_what_each_world_is_for(self):
+        # A bare target name answers nothing. The builder already describes
+        # each one, and the catalogue is where somebody chooses between them.
+        packages = self.read("packages.html")
+        self.assertIn("gcc and newlib", packages)
+        self.assertIn("llvm and musl", packages)
+
+    def test_the_counts_say_they_are_not_about_the_selected_release(self):
+        # They are the builder's current state, across every release. Read as
+        # a description of the release selected above, they would be wrong,
+        # and about a target that release may not even serve.
+        packages = self.read("packages.html")
+        self.assertIn("whichever release is selected", packages)
+
     def test_a_package_shows_a_different_state_per_world(self):
         page = self.read(os.path.join("package", "zlib.html"))
         self.assertIn("Built", page)

@@ -732,7 +732,11 @@ def render_catalogue(status: dict[str, Any], label: str, column: dict[str, str] 
                         "waiting-for-dependencies", "failed-to-build")
             if tally.get(key))
         world_label = f'<span class="world">{esc(world["arch"])}</span> ' if len(worlds) > 1 else ""
-        summaries.append(f"<p class=\"summary\">{world_label}{line}</p>")
+        # A bare target name answers nothing: what somebody needs to know is
+        # what it is for, and the builder already says so.
+        note = (f' <span class="desc">{esc(world["description"])}</span>'
+                if len(worlds) > 1 and world.get("description") else "")
+        summaries.append(f"<p class=\"summary\">{world_label}{line}{note}</p>")
 
     if not live:
         headers = ""
@@ -789,6 +793,16 @@ def render_catalogue(status: dict[str, Any], label: str, column: dict[str, str] 
         f'<code>{esc(w["core"])}</code>' + (f' ({esc(w["arch"])})' if len(worlds) > 1 else "")
         for w in worlds)
 
+    # The counts below are what the builder is doing right now, across every
+    # release. Without saying so they read as a description of whichever
+    # release is selected above, which is a different thing and a target it
+    # may not even serve.
+    targets_lede = (
+        '<p class="lede">A target is the ABI everything it compiles uses, so a '
+        'package built for one cannot be installed into the other. These counts '
+        'are what the builder holds now, whichever release is selected.</p>'
+        if len(worlds) > 1 else "")
+
     if len(worlds) > 1:
         options = "".join(f'<option value="{esc(w["arch"])}">{esc(w["arch"])}</option>'
                           for w in worlds)
@@ -818,6 +832,7 @@ def render_catalogue(status: dict[str, Any], label: str, column: dict[str, str] 
 <p class="lede">{len(packages)} packages built against {against}
 from <a href="https://github.com/{esc(status.get("packages_repo", ""))}">{esc(status.get("packages_repo", ""))}</a>.</p>
 {difference}
+{targets_lede}
 {"".join(summaries)}
 <div class="controls">
   <input id="filter" type="search" placeholder="Filter by name or description" autocomplete="off">
