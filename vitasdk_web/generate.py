@@ -333,6 +333,41 @@ def bootstrap_snippet(channel: str | None, windows: bool) -> str:
     return f"curl -fsSL {INSTALLER_URL}.sh | {set_channel}bash"
 
 
+# Which Docker Hub repository a channel's world publishes to, and what its tag
+# drops -- the same mapping vitasdk/docker's scripts/worlds.py resolves at
+# publish time. Kept here rather than imported: the two repositories agree on
+# the naming, not on their code.
+DOCKER_WORLDS = {
+    "vita": {"repository": "vitasdk/vitasdk", "channel_suffix": ""},
+    "vita_softfp": {"repository": "vitasdk/vitasdk-softfp", "channel_suffix": "-softfp"},
+}
+
+
+def docker_repository_and_tag(channel: str, world: str) -> tuple[str, str]:
+    info = DOCKER_WORLDS.get(world, DOCKER_WORLDS["vita"])
+    suffix = info["channel_suffix"]
+    tag = channel[: -len(suffix)] if suffix and channel.endswith(suffix) else channel
+    return info["repository"], tag
+
+
+COPY_ICON = ('<svg viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" '
+            'd="M4 1.5A1.5 1.5 0 0 1 5.5 0h6A1.5 1.5 0 0 1 13 1.5v6a1.5 1.5 0 0 1-1.5 '
+            '1.5h-6A1.5 1.5 0 0 1 4 7.5v-6ZM1 4.5A1.5 1.5 0 0 1 2.5 3H3v8.5A2.5 2.5 0 0 '
+            '0 5.5 14H10v.5A1.5 1.5 0 0 1 8.5 16h-6A1.5 1.5 0 0 1 1 14.5v-10Z"/></svg>')
+
+
+def copy_block(command: str) -> str:
+    """A command a reader can copy without selecting it by hand.
+
+    The button reads its sibling <code>'s own text at click time rather than
+    carrying a duplicate copy in an attribute, so there is exactly one place
+    a command can drift from what actually runs.
+    """
+    return (f'<pre class="copybox"><button class="copy" type="button" '
+            f'aria-label="Copy to clipboard">{COPY_ICON}</button>'
+            f'<code>{command}</code></pre>')
+
+
 def read_database(data: bytes) -> dict[str, dict[str, str]]:
     """What a published repository contains, from its own pacman database.
 
@@ -521,7 +556,7 @@ def page(title: str, *, body: str, chrome: str, depth: int = 0,
 """
 
 
-def component_rows(lock: dict[str, Any] | None, gcc: str) -> str:
+def component_pills(lock: dict[str, Any] | None, gcc: str) -> str:
     """What a channel actually ships, named rather than hashed.
 
     The lock pins the autotools components by source hash, which says nothing
@@ -535,14 +570,16 @@ def component_rows(lock: dict[str, Any] | None, gcc: str) -> str:
         "pthread": "https://github.com/vitasdk/pthread-embedded/commit/",
         "toolchain": "https://github.com/vitasdk/vita-toolchain/commit/",
         "samples": "https://github.com/vitasdk/samples/commit/",
+        # Pinned by release tag rather than by commit, so it links to the tag.
+        "vdpm": "https://github.com/vitasdk/vdpm/releases/tag/",
     }
     labels = {"newlib": "newlib", "headers": "vita-headers",
               "pthread": "pthread-embedded", "toolchain": "vita-toolchain",
               "samples": "samples", "vdpm": "vdpm"}
 
-    rows = ""
+    pills = ""
     if gcc:
-        rows += f'<tr><td>gcc</td><td class="version">{esc(gcc)}</td></tr>'
+        pills += f'<span class="pill">gcc <code>{esc(gcc)}</code></span>'
     sources = (lock or {}).get("sources") or {}
     for key, label in labels.items():
         value = sources.get(key)
@@ -550,10 +587,11 @@ def component_rows(lock: dict[str, Any] | None, gcc: str) -> str:
             continue
         shown = value[:12] if len(value) == 40 else value
         base = repositories.get(key)
-        cell = (f'<a href="{esc(base + value)}"><code>{esc(shown)}</code></a>'
-                if base else f"<code>{esc(shown)}</code>")
-        rows += f'<tr><td>{esc(label)}</td><td class="version">{cell}</td></tr>'
-    return rows
+        tag = "a" if base else "span"
+        href = f' href="{esc(base + value)}"' if base else ""
+        pills += (f'<{tag} class="pill"{href}>{esc(label)} '
+                 f'<code>{esc(shown)}</code></{tag}>')
+    return pills
 
 
 def render_downloads(name: str | None, item: dict[str, Any] | None,
@@ -587,6 +625,7 @@ lists the systems it builds for and how to install each.</p>
               for entry in (manifest or {}).get("hosts", [])
               if isinstance(entry, dict) and entry.get("name")}
     built = absolute(built_at) if built_at else ""
+    built_html = f'<span class="built">Built {esc(built)}</span>' if built else ""
 
     hosts = sorted(architectures)
     # Linux x86_64 is the panel somebody without script lands on.
@@ -616,52 +655,83 @@ lists the systems it builds for and how to install each.</p>
                      f'release page</a>')
         else:
             links = ""
-        built_html = f'<span class="built">Built {esc(built)}</span>' if built else ""
         panels += radio + f"""<div class="panel" data-for="{esc(host)}">
   <h2>{esc(host_label(host))} <span class="desc">{esc(host)}</span></h2>
   <p class="meta"><span class="badge ok">published</span> {built_html}</p>
-  <pre><code>{bootstrap_snippet(name, windows)}</code></pre>
+  {copy_block(bootstrap_snippet(name, windows))}
   <p class="links">{links}</p>
 </div>"""
 
-    rows = component_rows(lock, gcc)
+    # A card in the same picker, not a section of its own: it answers the same
+    # question -- how do I get this channel -- and a reader who has not
+    # settled on a host yet should see it right there among them.
+    docker_repo, docker_tag = docker_repository_and_tag(
+        name or "", (item or {}).get("world", "vita"))
+    docker_variants = (
+        ("Full", docker_tag),
+        ("Full, non-root", f"{docker_tag}-non-root"),
+        ("Minimal (core only)", f"{docker_tag}-minimal"),
+        ("Minimal, non-root", f"{docker_tag}-minimal-non-root"),
+    )
+    docker_boxes = "".join(
+        f'<p class="k">{esc(label)}</p>'
+        f'{copy_block(f"docker run --rm -it {esc(docker_repo)}:{esc(variant_tag)} bash")}'
+        for label, variant_tag in docker_variants)
+    cards += ('<label class="host" for="host-docker" data-host="docker">'
+             '<span class="name">Docker</span>'
+             '<span class="desc">container, any OS</span></label>')
+    panels += (
+        '<input class="pick" type="radio" name="host" id="host-docker" value="docker">'
+        f'<div class="panel" data-for="docker">'
+        f'<h2>Docker <span class="desc">{esc(docker_repo)}</span></h2>'
+        f'<p class="meta"><span class="badge ok">published</span> {built_html}</p>'
+        f'{docker_boxes}'
+        f'<p class="links"><a href="https://hub.docker.com/r/{esc(docker_repo)}">'
+        f'{esc(docker_repo)} on Docker Hub</a></p>'
+        f'</div>')
+
+    pills = component_pills(lock, gcc)
     inside = f"""
 <h2>What this channel ships</h2>
-<table class="inside">{rows}</table>
-""" if rows else ""
+<p class="pills">{pills}</p>
+""" if pills else ""
 
     channel = esc(name or "")
     summary_html = f'<p class="lede">{esc(summary)}</p>' if summary else ""
 
+    sample_command = ('cmake -S "$VITASDK/share/gcc-arm-vita-eabi/samples/hello_world" \\\n'
+                      '  -B /tmp/hello -DCMAKE_TOOLCHAIN_FILE="$VITASDK/share/vita.toolchain.cmake"\n'
+                      'cmake --build /tmp/hello')
+    verify_command = (f'curl -fsSLO https://vitasdk.org/channels/{channel}.json\n'
+                      f'curl -fsSLO https://vitasdk.org/channels/{channel}.json.sig\n'
+                      'openssl pkeyutl -verify -rawin -pubin \\\n'
+                      '  -inkey "$VITASDK/share/vdpm/channel-public-key.pem" \\\n'
+                      f'  -sigfile {channel}.json.sig -in {channel}.json')
+
     return f"""
 <h1>Downloads</h1>
 {summary_html}
-<p class="lede">Pick your system. Every one of them installs the same way; the
-command below changes with it.</p>
+{inside}
+<h2>Pick your system</h2>
+<p class="lede">Every one of them installs the same way; the command below
+changes with it.</p>
 <div class="picker">
   <div class="hosts">{cards}</div>
   <div class="panels">{panels}</div>
 </div>
-{inside}
 <h2>Then what</h2>
 <ol class="steps">
   <li>Install a package: <code>vdpm install libpng</code>. <a href="packages.html">What
       there is</a>.</li>
   <li>Build the sample it ships with:
-<pre><code>cmake -S "$VITASDK/share/gcc-arm-vita-eabi/samples/hello_world" \\
-  -B /tmp/hello -DCMAKE_TOOLCHAIN_FILE="$VITASDK/share/vita.toolchain.cmake"
-cmake --build /tmp/hello</code></pre></li>
+  {copy_block(sample_command)}</li>
   <li>Keep it current with <code>vdpm upgrade</code>. A series only moves when it
       is patched; nightly moves under you.</li>
 </ol>
 <h2>Checking what you got</h2>
 <p>The channel this page describes is served as a signed document, and the key
 that signs it ships inside the SDK. Nothing downstream is trusted for it:</p>
-<pre><code>curl -fsSLO https://vitasdk.org/channels/{channel}.json
-curl -fsSLO https://vitasdk.org/channels/{channel}.json.sig
-openssl pkeyutl -verify -rawin -pubin \\
-  -inkey "$VITASDK/share/vdpm/channel-public-key.pem" \\
-  -sigfile {channel}.json.sig -in {channel}.json</code></pre>
+{copy_block(verify_command)}
 <p class="desc">Every package and every archive it names carries its own
 checksum, and the client checks those on install.</p>
 <script>
@@ -696,6 +766,18 @@ checksum, and the client checks those on install.</p>
     }});
   }}
 }})();
+</script>
+<script>
+document.querySelectorAll('.copy').forEach(function (button) {{
+  button.addEventListener('click', function () {{
+    var code = button.nextElementSibling;
+    if (!code) return;
+    navigator.clipboard.writeText(code.textContent).then(function () {{
+      button.classList.add('copied');
+      setTimeout(function () {{ button.classList.remove('copied'); }}, 1200);
+    }});
+  }});
+}});
 </script>
 """
 
@@ -1506,10 +1588,21 @@ th { color: var(--muted); font-weight: 600; font-size: 13px; }
     margin: .6rem 0 0; }
 .pick:checked + .panel { display: block; }
 .host.current { border-color: var(--accent); background: var(--chip); }
-table.inside { width: auto; margin-bottom: 1.4rem; }
-table.inside td { padding: .2rem 1.4rem .2rem 0; }
+.pills { margin: 0 0 1.4rem; }
+.pill code { font-size: 12px; }
 ol.steps { line-height: 1.7; padding-left: 1.2rem; }
 ol.steps pre { margin: .5rem 0; }
+.k { margin: .8rem 0 .3rem; font-size: 13px; font-weight: 600; color: var(--muted); }
+.k:first-child { margin-top: 0; }
+pre.copybox { position: relative; padding-right: 2.6rem; white-space: pre-wrap;
+    word-break: break-all; }
+.copy { position: absolute; top: .5rem; right: .5rem; width: 1.8rem; height: 1.8rem;
+    display: flex; align-items: center; justify-content: center; padding: 0;
+    border: 1px solid var(--line); border-radius: 6px; background: var(--bg);
+    color: var(--muted); cursor: pointer; }
+.copy:hover { border-color: var(--accent); color: var(--accent); }
+.copy svg { width: 1rem; height: 1rem; }
+.copy.copied { border-color: var(--ok); color: var(--ok); }
 """
 
 

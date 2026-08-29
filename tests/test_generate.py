@@ -153,10 +153,11 @@ class TestGenerate(unittest.TestCase):
             {"core": "sdk-snapshot-1", "core_repo": "vitasdk/autobuilds",
              "architectures": {"x86_64-linux-gnu": {}, "x86_64-w64-mingw32": {}}},
             None, None)
-        # One radio and one panel per host, and the radio sits beside its
-        # panel so the CSS that swaps them needs no script and no host names.
-        self.assertEqual(page.count('class="pick"'), 2)
-        self.assertEqual(page.count('class="panel"'), 2)
+        # One radio and one panel per host, plus one more for Docker, and the
+        # radio sits beside its panel so the CSS that swaps them needs no
+        # script and no host names.
+        self.assertEqual(page.count('class="pick"'), 3)
+        self.assertEqual(page.count('class="panel"'), 3)
         self.assertIn('type="radio" name="host" id="host-x86-64-linux-gnu"', page)
         self.assertIn('id="host-x86-64-linux-gnu" value="x86_64-linux-gnu" checked', page)
         # Windows phrases it differently, and that is the only difference.
@@ -183,6 +184,28 @@ class TestGenerate(unittest.TestCase):
         self.assertIn("What most homebrew is built against.", page)
         # A source hash says nothing to a reader, so it is not shown as one.
         self.assertNotIn("SHA256=", page)
+        # Pills, not a bare table -- consistent with the cards and copyboxes
+        # around it rather than the one plain-lined table on the page.
+        self.assertIn('class="pill"', page)
+        self.assertNotIn("<table", page)
+
+    def test_vdpm_links_to_its_release_tag(self):
+        # Pinned by tag rather than by commit, so a bare vitasdk/vdpm/commit/
+        # URL -- the pattern every other component uses -- would 404.
+        page = generate.render_downloads(
+            "2026.08", {"core": "sdk-snapshot-1", "core_repo": "r",
+                        "architectures": {"x86_64-linux-gnu": {}}},
+            None, None, lock={"sources": {"vdpm": "v0.1.4"}})
+        self.assertIn('href="https://github.com/vitasdk/vdpm/releases/tag/v0.1.4"', page)
+
+    def test_gcc_has_no_link(self):
+        # Read off the installed package's file list, not off a vitasdk
+        # commit -- there is nothing of ours to point it at.
+        page = generate.render_downloads(
+            "2026.08", {"core": "sdk-snapshot-1", "core_repo": "r",
+                        "architectures": {"x86_64-linux-gnu": {}}},
+            None, None, gcc="15.2.0")
+        self.assertIn('<span class="pill">gcc <code>15.2.0</code></span>', page)
 
     def test_downloads_say_how_to_check_the_signature(self):
         page = generate.render_downloads(
@@ -947,6 +970,11 @@ class TestDownloads(unittest.TestCase):
         self.assertIn("vdpm-1-x86_64-linux-gnu.pkg.tar.xz", html)
         self.assertIn("Built ", html)
 
+    def test_the_docker_panel_shows_the_same_build_date_as_the_hosts(self):
+        # It ships exactly what the core panels do, from the same build.
+        html = generate.render_downloads("nightly", self.ITEM, None, 1_700_000_000)
+        self.assertEqual(html.count("Built "), len(self.ITEM["architectures"]) + 1)
+
     def test_an_old_snapshot_without_release_json_still_shows_the_host(self):
         # release.json only exists on snapshots published from now on; an
         # older one degrades to a bare link and no build date, not a crash.
@@ -963,6 +991,53 @@ class TestDownloads(unittest.TestCase):
     def test_the_install_command_names_the_channel(self):
         html = generate.render_downloads("2026.09", self.ITEM, None, None)
         self.assertIn("VITASDK_CHANNEL=2026.09", html)
+
+    def test_docker_defaults_to_the_vita_repository(self):
+        html = generate.render_downloads("nightly", self.ITEM, None, None)
+        self.assertIn("vitasdk/vitasdk:nightly", html)
+        self.assertNotIn("vitasdk-softfp", html)
+
+    def test_docker_softfp_uses_its_own_repository_and_drops_the_suffix(self):
+        item = {**self.ITEM, "world": "vita_softfp"}
+        html = generate.render_downloads("nightly-softfp", item, None, None)
+        self.assertIn("vitasdk/vitasdk-softfp:nightly", html)
+        self.assertNotIn("vitasdk-softfp:nightly-softfp", html)
+
+    def test_docker_is_a_card_in_the_same_picker(self):
+        html = generate.render_downloads("nightly", self.ITEM, None, None)
+        self.assertIn('id="host-docker" value="docker"', html)
+        self.assertIn('data-for="docker"', html)
+
+    def test_docker_offers_all_four_variants(self):
+        html = generate.render_downloads("nightly", self.ITEM, None, None)
+        for tag in ("vitasdk/vitasdk:nightly bash", "vitasdk/vitasdk:nightly-non-root bash",
+                   "vitasdk/vitasdk:nightly-minimal bash",
+                   "vitasdk/vitasdk:nightly-minimal-non-root bash"):
+            self.assertIn(tag, html)
+
+    def test_every_command_is_copyable(self):
+        # Bootstrap (one per host -- ITEM has two), the four Docker variants,
+        # the sample build, and the signature check -- copy_block wraps them.
+        html = generate.render_downloads("nightly", self.ITEM, None, None)
+        self.assertEqual(html.count('class="copybox"'), 2 + 4 + 1 + 1)
+        self.assertEqual(html.count('class="copy"'), html.count('class="copybox"'))
+
+
+class TestDockerRepositoryAndTag(unittest.TestCase):
+    """Which Docker Hub repository and tag a channel's world resolves to."""
+
+    def test_default_world(self):
+        self.assertEqual(generate.docker_repository_and_tag("nightly", "vita"),
+                         ("vitasdk/vitasdk", "nightly"))
+
+    def test_softfp_drops_its_channel_suffix(self):
+        self.assertEqual(
+            generate.docker_repository_and_tag("nightly-softfp", "vita_softfp"),
+            ("vitasdk/vitasdk-softfp", "nightly"))
+
+    def test_an_unknown_world_falls_back_to_vita(self):
+        self.assertEqual(generate.docker_repository_and_tag("nightly", "made-up"),
+                         ("vitasdk/vitasdk", "nightly"))
 
 
 class TestChrome(unittest.TestCase):
