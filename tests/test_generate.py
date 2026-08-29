@@ -6,6 +6,8 @@ import re
 import tarfile
 import tempfile
 import unittest
+import urllib.error
+import urllib.request
 from unittest import mock
 
 from vitasdk_web import generate
@@ -762,7 +764,54 @@ class TestReleases(unittest.TestCase):
         self.assertIn("packages-snapshot-20260813.2.1.html", snapshot_pages)
 
     def test_unreachable_channels_do_not_stop_the_build(self):
-        self.assertEqual(generate.load_channels("https://127.0.0.1:9/channels"), {})
+        # No index is no series yet, which is how a site looks before the
+        # first release: nothing to describe is not a broken deployment.
+        with mock.patch.object(generate, "RETRY_BACKOFF", 0):
+            self.assertEqual(generate.load_channels("https://127.0.0.1:9/channels"), {})
+
+    def test_a_blip_is_retried_before_it_is_believed(self):
+        calls = []
+
+        def flaky(url, timeout=None):
+            calls.append(url)
+            if len(calls) < 3:
+                raise urllib.error.URLError("reset by peer")
+            return io.BytesIO(b'{"channels":{}}')
+
+        with mock.patch.object(generate, "RETRY_BACKOFF", 0):
+            with mock.patch("urllib.request.urlopen", flaky):
+                self.assertEqual(generate.fetch_json("https://example.invalid/i.json"),
+                                 {"channels": {}})
+        self.assertEqual(len(calls), 3)
+
+    def test_a_channel_the_index_names_and_cannot_be_read_stops_the_build(self):
+        # Rendering it as empty is what put "No release channel is published
+        # yet" on a live page whose channel was published and fine.
+        def index_only(url, timeout=None):
+            if url.endswith("index.json"):
+                return io.BytesIO(
+                    b'{"channels":{"2026.08":{"status":"supported"}}}')
+            raise urllib.error.URLError("reset by peer")
+
+        with mock.patch.object(generate, "RETRY_BACKOFF", 0):
+            with mock.patch("urllib.request.urlopen", index_only):
+                with self.assertRaises(generate.ChannelUnreadable):
+                    generate.load_channels("https://example.invalid/channels")
+
+    def test_a_channel_that_is_really_gone_is_not_retried(self):
+        # A 404 is an answer, not a failure to get one, so asking again can
+        # only give the same one more slowly.
+        calls = []
+
+        def missing(url, timeout=None):
+            calls.append(url)
+            raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
+
+        with mock.patch.object(generate, "RETRY_BACKOFF", 0):
+            with mock.patch("urllib.request.urlopen", missing):
+                self.assertIsNone(
+                    generate.fetch_json("https://example.invalid/gone.json"))
+        self.assertEqual(len(calls), 1, "a 404 was asked for more than once")
 
 
 class TestSnapshotBrowsing(unittest.TestCase):

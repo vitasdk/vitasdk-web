@@ -142,7 +142,16 @@ def load_channels(base: str) -> dict[str, Any]:
         return {}
     series = {}
     for name, entry in sorted(index.get("channels", {}).items()):
-        manifest = fetch_json(f"{base}/{name}.json") or {}
+        manifest = fetch_json(f"{base}/{name}.json")
+        # The index is what says a channel exists. One it names whose manifest
+        # cannot be read is not a channel with nothing in it -- it is a read
+        # that failed, and rendering it as empty tells everybody looking at
+        # that page that there is nothing to install. Better to publish
+        # nothing new and leave the last good pages standing.
+        if manifest is None:
+            raise ChannelUnreadable(
+                f"{base}/{name}.json could not be read, and the index says it "
+                "is published; refusing to describe it as having nothing")
         core = manifest.get("core") or {}
         series[name] = {
             "status": entry.get("status", "unknown"),
@@ -157,12 +166,33 @@ def load_channels(base: str) -> dict[str, Any]:
     return series
 
 
-def fetch_json(url: str) -> dict[str, Any] | None:
-    try:
-        with urllib.request.urlopen(url, timeout=30) as response:  # noqa: S310
-            return json.loads(response.read().decode())
-    except (urllib.error.URLError, ValueError, TimeoutError):
-        return None
+# Seconds before the first retry, doubling after it. A constant so a test can
+# make it nothing: what a test checks is that a blip is retried, not that the
+# waiting works.
+RETRY_BACKOFF = 1.0
+
+
+class ChannelUnreadable(Exception):
+    """The index names a channel whose manifest could not be read."""
+
+
+def fetch_json(url: str, attempts: int = 3) -> dict[str, Any] | None:
+    """None means absent. A blip is retried before it is believed."""
+
+    for attempt in range(attempts):
+        try:
+            with urllib.request.urlopen(url, timeout=30) as response:  # noqa: S310
+                return json.loads(response.read().decode())
+        except urllib.error.HTTPError as error:
+            if error.code == 404:
+                return None
+            if attempt + 1 == attempts:
+                return None
+        except (urllib.error.URLError, ValueError, TimeoutError):
+            if attempt + 1 == attempts:
+                return None
+        time.sleep(RETRY_BACKOFF * 2 ** attempt)
+    return None
 
 
 def fetch_bytes(url: str) -> bytes | None:
@@ -1626,8 +1656,16 @@ def main(argv: list[str]) -> int:
         return 2
 
     # Read from where the client reads them; missing simply means no series
-    # are published yet, which is not a reason to fail a deployment.
-    written = generate(status, args.output, load_channels(args.channels))
+    # are published yet, which is not a reason to fail a deployment. A series
+    # the index does name and that will not read is a different thing, and
+    # stopping leaves the pages already served in place.
+    try:
+        channels = load_channels(args.channels)
+    except ChannelUnreadable as e:
+        print(f"::error::{e}")
+        return 1
+
+    written = generate(status, args.output, channels)
     print(f"Wrote {len(written)} files to {args.output}")
     return 0
 
