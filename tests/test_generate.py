@@ -786,6 +786,30 @@ class TestReleases(unittest.TestCase):
         self.assertIn("In 2026.09", packages)
         self.assertIn("packages-snapshot-20260813.2.1.html", snapshot_pages)
 
+    def test_a_channels_world_is_read_from_its_manifest(self):
+        # Missing from series would send Docker links for every softfp
+        # channel to the default world's repository.
+        def respond(url, timeout=None):
+            if url.endswith("index.json"):
+                return io.BytesIO(
+                    b'{"channels":{"nightly-softfp":{"status":"development"}}}')
+            return io.BytesIO(b'{"world":"vita_softfp"}')
+
+        with mock.patch("urllib.request.urlopen", respond):
+            series = generate.load_channels("https://example.invalid/channels")
+        self.assertEqual(series["nightly-softfp"]["world"], "vita_softfp")
+
+    def test_a_channel_without_a_world_field_defaults_to_vita(self):
+        def respond(url, timeout=None):
+            if url.endswith("index.json"):
+                return io.BytesIO(
+                    b'{"channels":{"nightly":{"status":"development"}}}')
+            return io.BytesIO(b'{}')
+
+        with mock.patch("urllib.request.urlopen", respond):
+            series = generate.load_channels("https://example.invalid/channels")
+        self.assertEqual(series["nightly"]["world"], "vita")
+
     def test_unreachable_channels_do_not_stop_the_build(self):
         # No index is no series yet, which is how a site looks before the
         # first release: nothing to describe is not a broken deployment.

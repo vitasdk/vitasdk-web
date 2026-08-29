@@ -157,6 +157,7 @@ def load_channels(base: str) -> dict[str, Any]:
             "status": entry.get("status", "unknown"),
             "summary": entry.get("summary", ""),
             "sequence": manifest.get("sequence"),
+            "world": manifest.get("world", "vita"),
             "core": core.get("release", ""),
             "core_repo": core.get("repository", ""),
             "architectures": core.get("architectures", {}),
